@@ -8,7 +8,7 @@ Rust-native · <5ms latency · 33+ entity types · 91.7% real-world protection �
 
 [Website](https://cloakpipe.co) · [Docs](https://docs.cloakpipe.co) · [Cloud Dashboard](https://app.cloakpipe.co) · [Discord](https://discord.gg/cloakpipe)
 
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![Crates.io](https://img.shields.io/crates/v/cloakpipe.svg)](https://crates.io/crates/cloakpipe)
 [![Docker](https://img.shields.io/docker/pulls/cloakpipe/cloakpipe.svg)](https://hub.docker.com/r/cloakpipe/cloakpipe)
 
@@ -35,35 +35,30 @@ Your App  ──▶  CloakPipe  ──▶  OpenAI / Anthropic / Any LLM
 
 ## Quick Start
 
-### Docker (recommended)
+### Build from source
 
 ```bash
-# Start CloakPipe
-docker run -p 3100:3100 ghcr.io/cloakpipe/cloakpipe:latest
+git clone https://github.com/rohansx/cloakpipe
+cd cloakpipe
+
+# Your upstream provider key is required (CloakPipe forwards to it)
+export OPENAI_API_KEY=sk-...
+
+# Start the proxy — writes a default cloakpipe.toml on first run,
+# listening on 127.0.0.1:8900
+cargo run -p cloakpipe-cli -- start
 
 # Point your OpenAI SDK at CloakPipe
-export OPENAI_BASE_URL=http://localhost:3100/v1
-
-# Done. All LLM calls now go through CloakPipe.
+export OPENAI_BASE_URL=http://127.0.0.1:8900/v1
 ```
 
-### Binary
-
-```bash
-# Install via cargo
-cargo install cloakpipe
-
-# Or download the latest release
-curl -fsSL https://cloakpipe.co/install.sh | sh
-
-# Start the proxy
-cloakpipe serve --port 3100
-```
+> Prebuilt binaries, `cargo install cloakpipe`, and a published Docker image
+> are on the roadmap — build from source for now.
 
 ### Verify it works
 
 ```bash
-curl http://localhost:3100/v1/chat/completions \
+curl http://127.0.0.1:8900/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -d '{
@@ -225,7 +220,7 @@ from openai import OpenAI
 
 # Just change the base URL. That's it.
 client = OpenAI(
-    base_url="http://localhost:3100/v1",  # CloakPipe proxy
+    base_url="http://127.0.0.1:8900/v1",  # CloakPipe proxy
     api_key="sk-your-openai-key"          # Your real API key
 )
 
@@ -248,7 +243,7 @@ from langchain_openai import ChatOpenAI
 
 llm = ChatOpenAI(
     model="gpt-4",
-    openai_api_base="http://localhost:3100/v1",  # CloakPipe proxy
+    openai_api_base="http://127.0.0.1:8900/v1",  # CloakPipe proxy
     openai_api_key="sk-your-key"
 )
 
@@ -261,7 +256,7 @@ response = llm.invoke("Summarize patient records for Aadhaar 2345 6789 0123")
 from anthropic import Anthropic
 
 client = Anthropic(
-    base_url="http://localhost:3100/v1/anthropic",  # CloakPipe proxy
+    base_url="http://127.0.0.1:8900/v1/anthropic",  # CloakPipe proxy
     api_key="sk-ant-your-key"
 )
 
@@ -278,7 +273,7 @@ message = client.messages.create(
 
 ```bash
 # Works with any LLM API that uses the OpenAI format
-curl http://localhost:3100/v1/chat/completions \
+curl http://127.0.0.1:8900/v1/chat/completions \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $OPENAI_API_KEY" \
   -d '{
@@ -295,7 +290,7 @@ import { generateText } from 'ai';
 
 const result = await generateText({
   model: openai('gpt-4', {
-    baseURL: 'http://localhost:3100/v1',  // CloakPipe proxy
+    baseURL: 'http://127.0.0.1:8900/v1',  // CloakPipe proxy
   }),
   prompt: 'Analyze the customer data for Rajesh, Aadhaar 2345 6789 0123',
 });
@@ -306,24 +301,25 @@ const result = await generateText({
 ## CLI
 
 ```bash
-# Scan text for PII (no proxy, just detection)
-cloakpipe scan "Dr. Rajesh Singh, Aadhaar 2345 6789 0123"
+# Test detection on inline text (no proxy, just detection)
+cloakpipe test --text "Dr. Rajesh Singh, Aadhaar 2345 6789 0123"
 # Output:
 # ✓ PERSON: "Dr. Rajesh Singh" (confidence: 0.97)
 # ✓ AADHAAR: "2345 6789 0123" (confidence: 1.00)
 
-# Mask text (replace PII with tokens)
-cloakpipe mask "Contact Priya at priya@example.com or +91 98765 43210"
-# Output: "Contact PERSON_001 at EMAIL_001 or PHONE_001"
+# Scan & mask files/directories (recursively masks .txt/.md/.json/.csv)
+cloakpipe scan ./docs                      # writes masked copies to ./docs-masked
+cloakpipe scan ./docs --detect-only        # report only, no masking
 
-# Start the proxy server
-cloakpipe serve --port 3100
+# Create a config, then start the proxy server (listens on 127.0.0.1:8900)
+cloakpipe init                             # writes cloakpipe.toml
+cloakpipe start                            # edit cloakpipe.toml to change port/policy/upstream
 
-# Start with a specific policy
-cloakpipe serve --port 3100 --policy policies/dpdp.yaml
+# Check the proxy is up
+curl http://127.0.0.1:8900/health
 
-# Check proxy health
-cloakpipe health
+# Other commands: setup (guided), stats, mcp, tree, vector, sessions
+cloakpipe --help
 ```
 
 ---
@@ -334,7 +330,7 @@ cloakpipe health
 
 ```bash
 # Proxy settings
-CLOAKPIPE_PORT=3100                    # Proxy port (default: 3100)
+CLOAKPIPE_PORT=8900                    # Proxy port (default: 8900)
 CLOAKPIPE_HOST=0.0.0.0                # Bind address (default: 0.0.0.0)
 CLOAKPIPE_LOG_LEVEL=info               # Log level: debug, info, warn, error
 
@@ -551,18 +547,23 @@ policies/
 
 ### Docker Compose
 
+> A published image and an in-repo `Dockerfile` are on the roadmap. Until then,
+> build the binary from source (see [Build from source](#quick-start)) and run
+> `cloakpipe start`. The compose snippet below is the intended shape once an
+> image ships — note the proxy must listen on `0.0.0.0` (not the default
+> `127.0.0.1`) to be reachable from outside the container.
+
 ```yaml
 version: '3.8'
 services:
   cloakpipe:
-    image: ghcr.io/cloakpipe/cloakpipe:latest
+    image: ghcr.io/cloakpipe/cloakpipe:latest   # roadmap — build locally for now
     ports:
-      - "3100:3100"
+      - "8900:8900"
     environment:
-      - CLOAKPIPE_UPSTREAM_URL=https://api.openai.com
-      - CLOAKPIPE_POLICY=policies/dpdp.yaml
-      - CLOAKPIPE_LOG_LEVEL=info
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
+      - ./cloakpipe.toml:/app/cloakpipe.toml     # set proxy.listen = "0.0.0.0:8900"
       - cloakpipe-vault:/data/vault
     restart: unless-stopped
 
@@ -579,7 +580,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/cloakpipe serve --port 3100
+ExecStart=/usr/local/bin/cloakpipe start
 Restart=always
 Environment=CLOAKPIPE_UPSTREAM_URL=https://api.openai.com
 
@@ -606,7 +607,7 @@ git clone https://github.com/rohansx/cloakpipe.git
 cd cloakpipe
 cargo build
 cargo test
-cargo run -p cloakpipe-cli -- serve --port 3100
+cargo run -p cloakpipe-cli -- start
 ```
 
 ---
@@ -646,7 +647,7 @@ Do **not** file a public GitHub issue for security vulnerabilities.
 
 ## License
 
-Apache-2.0. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
 
 The CloakPipe Cloud dashboard and enterprise features are proprietary (BUSL-1.1).
 
