@@ -52,8 +52,22 @@ cargo run -p cloakpipe-cli -- start
 export OPENAI_BASE_URL=http://127.0.0.1:8900/v1
 ```
 
-> Prebuilt binaries, `cargo install cloakpipe`, and a published Docker image
-> are on the roadmap — build from source for now.
+### Docker
+
+```bash
+docker build -t cloakpipe .
+docker run -p 8900:8900 -e OPENAI_API_KEY=sk-... cloakpipe
+
+# Proxy is now reachable at http://localhost:8900/v1
+export OPENAI_BASE_URL=http://localhost:8900/v1
+```
+
+The image binds `0.0.0.0:8900` and runs regex/heuristic detection with no model
+download. To use the neural detector, mount your own `cloakpipe.toml` (with
+`[detection.ner] enabled = true`) and the model files.
+
+> Prebuilt binaries, `cargo install cloakpipe`, and a published image
+> (`ghcr.io`) are on the roadmap — `docker build` or build from source for now.
 
 ### Verify it works
 
@@ -339,7 +353,7 @@ CLOAKPIPE_UPSTREAM_URL=https://api.openai.com  # Default upstream LLM API
 CLOAKPIPE_TIMEOUT=30                   # Request timeout in seconds
 
 # Detection
-CLOAKPIPE_POLICY=policies/dpdp.yaml   # Policy file path
+CLOAKPIPE_POLICY=policies/dpdp.toml   # Policy file path
 CLOAKPIPE_MIN_CONFIDENCE=0.8          # Minimum NER confidence threshold (0.0–1.0)
 
 # Vault
@@ -355,7 +369,7 @@ CLOAKPIPE_CLOUD_TOKEN=                 # Cloud dashboard token (app.cloakpipe.co
 CloakPipe uses YAML policy files to configure detection behavior per compliance framework:
 
 ```yaml
-# policies/dpdp.yaml — India Digital Personal Data Protection Act
+# policies/dpdp.toml — India Digital Personal Data Protection Act
 name: "DPDP Act 2023"
 version: "1.0"
 description: "Policy for India's Digital Personal Data Protection Act"
@@ -396,7 +410,7 @@ logging:
   export_format: "json"        # json | csv
 ```
 
-Pre-built policies included: `dpdp.yaml`, `gdpr.yaml`, `hipaa.yaml`, `pci-dss.yaml`, `minimal.yaml`
+Pre-built policies included: `dpdp.toml`, `gdpr.toml`, `hipaa.toml`, `pci-dss.toml`, `minimal.toml`
 
 ---
 
@@ -420,10 +434,10 @@ cloakpipe/
 │   ├── cloakpipe-mcp        # MCP server (6 tools via rmcp)
 │   └── cloakpipe-cli        # CLI interface (scan, mask, serve, vault, session)
 ├── policies/
-│   ├── dpdp.yaml
-│   ├── gdpr.yaml
-│   ├── hipaa.yaml
-│   └── pci-dss.yaml
+│   ├── dpdp.toml
+│   ├── gdpr.toml
+│   ├── hipaa.toml
+│   └── pci-dss.toml
 ├── Cargo.toml
 ├── LICENSE
 └── README.md
@@ -524,21 +538,21 @@ CloakPipe helps you meet regulatory requirements by ensuring PII never reaches a
 
 | Framework | What CloakPipe provides | Can we claim it? |
 |---|---|---|
-| **DPDP Act 2023** (India) | Detects Aadhaar, PAN, UPI, GSTIN. Self-hosted mode keeps data within your infrastructure — no cross-border transfer of personal data. Pre-built `policies/dpdp.yaml` profile. | ✅ "Supports DPDP compliance" — no certification body exists; compliance is technical. |
+| **DPDP Act 2023** (India) | Detects Aadhaar, PAN, UPI, GSTIN. Self-hosted mode keeps data within your infrastructure — no cross-border transfer of personal data. Pre-built `policies/dpdp.toml` profile. | ✅ "Supports DPDP compliance" — no certification body exists; compliance is technical. |
 | **GDPR** (EU) | Pseudonymization is explicitly recognized under GDPR Art. 25 (data protection by design). Tokens replace personal data before it reaches any third-party processor. | ✅ "GDPR-ready" — self-attested or validated by legal counsel. |
 | **HIPAA** (US) | PHI detection (patient IDs, diagnoses, medications), AES-256-GCM encrypted vault, tamper-evident audit logs meet HIPAA Security Rule technical safeguards. | ✅ "Supports HIPAA workflows" — HIPAA has no official certification body. |
-| **PCI-DSS** | Credit card (PAN) detection with Luhn validation, encrypted vault, no plaintext storage. Pre-built `policies/pci-dss.yaml`. | ✅ "Supports PCI-DSS workflows" — formal QSA audit required for full certification. |
+| **PCI-DSS** | Credit card (PAN) detection with Luhn validation, encrypted vault, no plaintext storage. Pre-built `policies/pci-dss.toml`. | ✅ "Supports PCI-DSS workflows" — formal QSA audit required for full certification. |
 | **SOC 2 Type II** | Structured audit logging, access controls, and incident response processes in place. Formal audit in roadmap. | 🔜 In progress — will not claim until third-party audit is complete. |
 
 Pre-built policy files are included in [`policies/`](policies/):
 
 ```
 policies/
-├── dpdp.yaml      # India Digital Personal Data Protection Act 2023
-├── gdpr.yaml      # EU General Data Protection Regulation
-├── hipaa.yaml     # US Health Insurance Portability and Accountability Act
-├── pci-dss.yaml   # Payment Card Industry Data Security Standard
-└── minimal.yaml   # Minimal — only high-confidence structured PII
+├── dpdp.toml      # India Digital Personal Data Protection Act 2023
+├── gdpr.toml      # EU General Data Protection Regulation
+├── hipaa.toml     # US Health Insurance Portability and Accountability Act
+├── pci-dss.toml   # Payment Card Industry Data Security Standard
+└── minimal.toml   # Minimal — only high-confidence structured PII
 ```
 
 ---
@@ -547,29 +561,24 @@ policies/
 
 ### Docker Compose
 
-> A published image and an in-repo `Dockerfile` are on the roadmap. Until then,
-> build the binary from source (see [Build from source](#quick-start)) and run
-> `cloakpipe start`. The compose snippet below is the intended shape once an
-> image ships — note the proxy must listen on `0.0.0.0` (not the default
-> `127.0.0.1`) to be reachable from outside the container.
-
 ```yaml
 version: '3.8'
 services:
   cloakpipe:
-    image: ghcr.io/cloakpipe/cloakpipe:latest   # roadmap — build locally for now
+    build: .                       # uses the repo Dockerfile
     ports:
       - "8900:8900"
     environment:
       - OPENAI_API_KEY=${OPENAI_API_KEY}
     volumes:
-      - ./cloakpipe.toml:/app/cloakpipe.toml     # set proxy.listen = "0.0.0.0:8900"
-      - cloakpipe-vault:/data/vault
+      - cloakpipe-data:/data       # vault + audit logs
     restart: unless-stopped
 
 volumes:
-  cloakpipe-vault:
+  cloakpipe-data:
 ```
+
+The bundled config already binds `0.0.0.0:8900` and stores state under `/data`.
 
 ### Systemd
 
