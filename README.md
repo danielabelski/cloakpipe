@@ -466,7 +466,7 @@ Each crate is independently usable. If you only need PII detection in your Rust 
 
 Tested on 4 cross-domain scenarios (Slack threads, invoice emails, medical notes, legal documents) — messy, unpredictable text that real users paste into LLMs. Not crafted for any detection system.
 
-| Metric | CloakPipe (v0.9) | Regex Only | nvidia/gliner-PII |
+| Metric | CloakPipe (v0.10) | Regex Only | nvidia/gliner-PII |
 |---|---|---|---|
 | **PII protection rate** | **91.7%** (55/60) | 53.4% | 65.9% |
 | **Names detected** | ✅ | ❌ | ✅ |
