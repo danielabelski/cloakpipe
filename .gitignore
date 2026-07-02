@@ -31,3 +31,5 @@ models/
 # Claude session data
 .claude/
 .reflect/
+.fastembed_cache/
+.illuminate/
