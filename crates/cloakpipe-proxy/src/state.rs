@@ -2,13 +2,26 @@
 
 use cloakpipe_audit::AuditLogger;
 use cloakpipe_core::{
-    config::CloakPipeConfig,
+    config::{CloakPipeConfig, CloudConfig},
     detector::Detector,
     session::SessionManager,
     vault::Vault,
 };
 use std::sync::Arc;
 use tokio::sync::Mutex;
+
+/// A single request's telemetry, buffered for periodic flush to CloakPipe Cloud.
+/// No raw prompt/PII — only counts, timing and the upstream model/provider.
+#[derive(Clone)]
+pub struct TelemetryEvent {
+    pub request_id: String,
+    pub timestamp: String,
+    pub entities_masked: i64,
+    pub latency_ms: f64,
+    pub upstream_provider: String,
+    pub upstream_model: String,
+    pub status: String,
+}
 
 /// Shared state accessible from all request handlers.
 pub struct AppState {
@@ -19,6 +32,10 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     pub api_key: String,
     pub sessions: Arc<SessionManager>,
+    /// Resolved CloakPipe Cloud config (`None` → cloud reporting off).
+    pub cloud: Option<CloudConfig>,
+    /// Buffer of per-request telemetry, drained by the flush loop (see CLI).
+    pub telemetry: Arc<Mutex<Vec<TelemetryEvent>>>,
 }
 
 impl AppState {
@@ -35,6 +52,7 @@ impl AppState {
             .expect("Failed to build HTTP client");
 
         let sessions = Arc::new(SessionManager::new(config.session.clone()));
+        let cloud = CloudConfig::resolve(&config.cloud);
 
         Self {
             config,
@@ -44,6 +62,8 @@ impl AppState {
             http_client,
             api_key,
             sessions,
+            cloud,
+            telemetry: Arc::new(Mutex::new(Vec::new())),
         }
     }
 }

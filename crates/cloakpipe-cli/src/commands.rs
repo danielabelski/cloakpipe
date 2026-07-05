@@ -8,7 +8,7 @@ use cloakpipe_core::{
     replacer::Replacer,
     vault::Vault,
 };
-use cloakpipe_proxy::{server, state::AppState};
+use cloakpipe_proxy::{server, state::{AppState, TelemetryEvent}};
 
 /// Load configuration from TOML file.
 fn load_config(path: &str) -> Result<CloakPipeConfig> {
@@ -88,47 +88,76 @@ pub async fn start(config_path: &str) -> Result<()> {
         "Starting CloakPipe proxy"
     );
 
-    // Optional CloakPipe Cloud reporting: heartbeat this instance so it shows
-    // up live in the dashboard. Runs alongside the proxy; failures are logged,
-    // never fatal.
-    if let Some(cloud) = resolve_cloud(&config) {
-        tracing::info!(url = %cloud.url, interval_s = cloud.heartbeat_seconds, "Cloud reporting on — heartbeating instance");
-        spawn_cloud_heartbeat(
-            cloud,
-            config.proxy.listen.clone(),
-            config.proxy.upstream.clone(),
-            config.profile.clone().unwrap_or_default(),
+    let state = AppState::new(config, detector, vault, audit, api_key);
+
+    // Optional CloakPipe Cloud reporting (heartbeat + telemetry flush). Both run
+    // alongside the proxy; failures are logged, never fatal.
+    if let Some(cloud) = state.cloud.clone() {
+        tracing::info!(
+            url = %cloud.url,
+            heartbeat_s = cloud.heartbeat_seconds,
+            telemetry_s = cloud.telemetry_seconds,
+            "Cloud reporting on — heartbeat + telemetry"
         );
+        spawn_cloud_heartbeat(
+            cloud.clone(),
+            state.config.proxy.listen.clone(),
+            state.config.proxy.upstream.clone(),
+            state.config.profile.clone().unwrap_or_default(),
+        );
+        spawn_cloud_telemetry_flush(cloud, state.telemetry.clone());
     }
 
-    let state = AppState::new(config, detector, vault, audit, api_key);
     server::start(state).await
 }
 
-/// Resolve cloud config from env (preferred) then the `[cloud]` config section.
-/// Returns `None` unless both a URL and token are present.
-fn resolve_cloud(config: &CloakPipeConfig) -> Option<cloakpipe_core::config::CloudConfig> {
-    let file = config.cloud.clone().unwrap_or_default();
-    let url = std::env::var("CLOAKPIPE_CLOUD_URL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(file.url);
-    let token = std::env::var("CLOAKPIPE_CLOUD_TOKEN")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or(file.token);
-    if url.is_empty() || token.is_empty() {
-        return None;
-    }
-    let heartbeat_seconds = std::env::var("CLOAKPIPE_CLOUD_HEARTBEAT_SECONDS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(file.heartbeat_seconds.max(5));
-    Some(cloakpipe_core::config::CloudConfig {
-        url,
-        token,
-        heartbeat_seconds,
-    })
+/// Spawn the background loop that drains buffered telemetry and POSTs it to
+/// `/api/v1/telemetry` on an interval. Best-effort — a rejected/failed flush
+/// drops that batch (telemetry is not durability-critical) rather than growing
+/// the buffer without bound.
+fn spawn_cloud_telemetry_flush(
+    cloud: cloakpipe_core::config::CloudConfig,
+    buffer: std::sync::Arc<tokio::sync::Mutex<Vec<TelemetryEvent>>>,
+) {
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        let url = format!("{}/api/v1/telemetry", cloud.url.trim_end_matches('/'));
+        let interval = std::time::Duration::from_secs(cloud.telemetry_seconds.max(5));
+        loop {
+            tokio::time::sleep(interval).await;
+            let batch: Vec<TelemetryEvent> = {
+                let mut buf = buffer.lock().await;
+                if buf.is_empty() {
+                    continue;
+                }
+                std::mem::take(&mut *buf)
+            };
+            let items: Vec<serde_json::Value> = batch
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "request_id": e.request_id,
+                        "timestamp": e.timestamp,
+                        "entities_detected": {},
+                        "entities_masked": e.entities_masked,
+                        "latency_ms": e.latency_ms,
+                        "upstream_provider": e.upstream_provider,
+                        "upstream_model": e.upstream_model,
+                        "policy": "mask",
+                        "status": e.status,
+                    })
+                })
+                .collect();
+            let payload = serde_json::json!({ "token": cloud.token, "batch": items });
+            match client.post(&url).json(&payload).send().await {
+                Ok(r) if r.status().is_success() => {
+                    tracing::debug!(count = batch.len(), "telemetry flushed")
+                }
+                Ok(r) => tracing::warn!(status = %r.status(), count = batch.len(), "telemetry flush rejected (dropped)"),
+                Err(e) => tracing::warn!(count = batch.len(), "telemetry flush failed: {e} (dropped)"),
+            }
+        }
+    });
 }
 
 /// Best-effort hostname for identifying this instance.

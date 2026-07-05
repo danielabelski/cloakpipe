@@ -41,10 +41,45 @@ pub struct CloudConfig {
     /// Heartbeat interval in seconds (default 30, min 5).
     #[serde(default = "default_heartbeat_seconds")]
     pub heartbeat_seconds: u64,
+    /// Telemetry flush interval in seconds (default 15, min 5).
+    #[serde(default = "default_telemetry_seconds")]
+    pub telemetry_seconds: u64,
 }
 
 fn default_heartbeat_seconds() -> u64 {
     30
+}
+
+fn default_telemetry_seconds() -> u64 {
+    15
+}
+
+impl CloudConfig {
+    /// Resolve the effective cloud config from env (preferred) then the config
+    /// file section. Returns `None` unless both a URL and token are present.
+    pub fn resolve(cfg: &Option<CloudConfig>) -> Option<CloudConfig> {
+        let file = cfg.clone().unwrap_or_default();
+        let env = |k: &str| std::env::var(k).ok().filter(|s| !s.is_empty());
+        let url = env("CLOAKPIPE_CLOUD_URL").unwrap_or(file.url);
+        let token = env("CLOAKPIPE_CLOUD_TOKEN").unwrap_or(file.token);
+        if url.is_empty() || token.is_empty() {
+            return None;
+        }
+        let heartbeat_seconds = env("CLOAKPIPE_CLOUD_HEARTBEAT_SECONDS")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(file.heartbeat_seconds)
+            .max(5);
+        let telemetry_seconds = env("CLOAKPIPE_CLOUD_TELEMETRY_SECONDS")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(file.telemetry_seconds)
+            .max(5);
+        Some(CloudConfig {
+            url,
+            token,
+            heartbeat_seconds,
+            telemetry_seconds,
+        })
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

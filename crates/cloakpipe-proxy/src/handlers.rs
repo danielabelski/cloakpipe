@@ -44,6 +44,12 @@ pub async fn proxy_chat_completions(
     Json(mut body): Json<Value>,
 ) -> Result<Response, (StatusCode, String)> {
     let request_id = Uuid::new_v4().to_string();
+    let started = std::time::Instant::now();
+    let model = body
+        .get("model")
+        .and_then(|m| m.as_str())
+        .unwrap_or_default()
+        .to_string();
     let is_streaming = body
         .get("stream")
         .and_then(|v| v.as_bool())
@@ -107,6 +113,25 @@ pub async fn proxy_chat_completions(
             .header("Content-Type", "application/json")
             .body(Body::from(error_body))
             .unwrap());
+    }
+
+    // Buffer telemetry for CloakPipe Cloud (best-effort, no PII — counts, timing
+    // and the upstream model only). The CLI's flush loop POSTs it periodically.
+    if state.cloud.is_some() {
+        let provider = if state.config.proxy.upstream.contains("anthropic") {
+            "anthropic"
+        } else {
+            "openai"
+        };
+        state.telemetry.lock().await.push(crate::state::TelemetryEvent {
+            request_id: request_id.clone(),
+            timestamp: chrono::Utc::now().to_rfc3339(),
+            entities_masked: entities_count as i64,
+            latency_ms: started.elapsed().as_secs_f64() * 1000.0,
+            upstream_provider: provider.to_string(),
+            upstream_model: model.clone(),
+            status: "ok".to_string(),
+        });
     }
 
     if is_streaming {
