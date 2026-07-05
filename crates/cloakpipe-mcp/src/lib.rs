@@ -29,6 +29,12 @@ pub struct CloakPipeServer {
     config: Arc<RwLock<DetectionConfig>>,
     active_profile: Arc<RwLock<Option<String>>>,
     sessions: Arc<SessionManager>,
+    /// M8: optional evidence ledger. When `CLOAKPIPE_LEDGER_DB` is set, each
+    /// `pseudonymize` tool call appends a no-PII `McpToolCall` hop record, so
+    /// MCP masking produces the same verifiable evidence as the proxy.
+    ledger: Option<Arc<Mutex<cloakpipe_ledger::store::LedgerStore>>>,
+    tenant_id: uuid::Uuid,
+    agent_id: uuid::Uuid,
     // Held for the rmcp tool-dispatch framework; not read directly in this crate.
     #[allow(dead_code)]
     tool_router: ToolRouter<Self>,
@@ -134,6 +140,7 @@ impl CloakPipeServer {
             Ok(r) => r,
             Err(e) => return format!("Error: Pseudonymize failed: {e}"),
         };
+        drop(vault); // release the vault lock before the ledger await below
 
         let categories: Vec<String> = entities
             .iter()
@@ -141,6 +148,12 @@ impl CloakPipeServer {
             .collect::<std::collections::HashSet<_>>()
             .into_iter()
             .collect();
+
+        // M8: record a no-PII evidence hop (categories + count only) so MCP
+        // masking is as auditable as the proxy.
+        if !entities.is_empty() {
+            self.record_mcp_hop(categories.join("+"), entities.len() as u32).await;
+        }
 
         let response = PseudonymizeResult {
             text: result.text,
@@ -324,13 +337,74 @@ impl CloakPipeServer {
         let detection_config = config.detection.clone();
         let profile = config.profile.clone();
         let sessions = Arc::new(SessionManager::new(config.session.clone()));
+        // M8: open the evidence ledger when CLOAKPIPE_LEDGER_DB points at a path.
+        let ledger = std::env::var("CLOAKPIPE_LEDGER_DB")
+            .ok()
+            .filter(|p| !p.is_empty())
+            .and_then(|p| match cloakpipe_ledger::store::LedgerStore::open(&p) {
+                Ok(s) => {
+                    tracing::info!(db = %p, "MCP evidence ledger enabled");
+                    Some(Arc::new(Mutex::new(s)))
+                }
+                Err(e) => {
+                    tracing::warn!("MCP ledger open failed ({e}); evidence disabled");
+                    None
+                }
+            });
+        let ns = uuid::Uuid::NAMESPACE_URL;
         Self {
             detector: Arc::new(RwLock::new(detector)),
             vault: Arc::new(Mutex::new(vault)),
             config: Arc::new(RwLock::new(detection_config)),
             active_profile: Arc::new(RwLock::new(profile)),
             sessions,
+            ledger,
+            tenant_id: uuid::Uuid::new_v5(&ns, b"cloakpipe-mcp-tenant"),
+            agent_id: uuid::Uuid::new_v5(&ns, b"cloakpipe-mcp-agent"),
             tool_router: Self::tool_router(),
+        }
+    }
+
+    /// M8: append a no-PII `McpToolCall` evidence record for a masking hop.
+    /// Only categories + a count + a random token are recorded — never text.
+    /// Best-effort: a ledger error is logged, never surfaced to the tool caller.
+    async fn record_mcp_hop(&self, entity_type: String, count: u32) {
+        let Some(ledger) = &self.ledger else { return };
+        let mut store = ledger.lock().await;
+        let next_seq = match store.head(&self.tenant_id) {
+            Ok((head, _)) => head.map(|s| s + 1).unwrap_or(0),
+            Err(e) => {
+                tracing::warn!("mcp ledger head failed: {e}");
+                return;
+            }
+        };
+        let builder = cloakpipe_ledger::RecordBuilder::new()
+            .seq(next_seq)
+            .tenant(self.tenant_id)
+            .hop(cloakpipe_ledger::Hop::McpToolCall)
+            .detection(cloakpipe_ledger::Detection {
+                entity_type: entity_type.clone(),
+                count,
+                detector: cloakpipe_ledger::Detector::Regex,
+            })
+            .action(cloakpipe_ledger::Action {
+                entity_type,
+                kind: cloakpipe_ledger::ActionKind::Pseudonymize,
+                token_ref: Some(uuid::Uuid::new_v4().to_string()),
+            })
+            .identities(cloakpipe_ledger::record::Identity {
+                agent_id: self.agent_id,
+                human_principal: None,
+                upstream: "mcp".to_string(),
+                region: std::env::var("CLOAKPIPE_REGION").unwrap_or_else(|_| "local".to_string()),
+            });
+        match builder.build() {
+            Ok(mut record) => {
+                if let Err(e) = store.append(&self.tenant_id, &mut record) {
+                    tracing::warn!("mcp ledger append failed: {e}");
+                }
+            }
+            Err(e) => tracing::warn!("mcp ledger build failed: {e}"),
         }
     }
 }
@@ -380,13 +454,61 @@ mod tests {
         let detector = Detector::from_config(&config).unwrap();
         let vault = Vault::ephemeral();
 
+        let ns = uuid::Uuid::NAMESPACE_URL;
         CloakPipeServer {
             detector: Arc::new(RwLock::new(detector)),
             vault: Arc::new(Mutex::new(vault)),
             config: Arc::new(RwLock::new(config)),
             active_profile: Arc::new(RwLock::new(None)),
             sessions: Arc::new(SessionManager::new(Default::default())),
+            ledger: None,
+            tenant_id: uuid::Uuid::new_v5(&ns, b"cloakpipe-mcp-tenant"),
+            agent_id: uuid::Uuid::new_v5(&ns, b"cloakpipe-mcp-agent"),
             tool_router: CloakPipeServer::tool_router(),
+        }
+    }
+
+    /// M8: calling the `pseudonymize` tool appends a no-PII evidence record to
+    /// the ledger — and the raw value never lands in the ledger DB.
+    #[tokio::test]
+    async fn mcp_pseudonymize_records_ledger_hop_without_raw_pii() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("mcp-ledger.sqlite");
+        let mut server = test_server();
+        server.ledger = Some(Arc::new(Mutex::new(
+            cloakpipe_ledger::store::LedgerStore::open(db.to_str().unwrap()).unwrap(),
+        )));
+
+        // Empty before.
+        assert_eq!(
+            server.ledger.as_ref().unwrap().lock().await.head(&server.tenant_id).unwrap().0,
+            None
+        );
+
+        // Call the real tool with PII in the text.
+        let secret = "secret@corp.com";
+        let out = server
+            .pseudonymize(Parameters(PseudonymizeParams {
+                text: format!("please email {secret} the report"),
+            }))
+            .await;
+        assert!(out.contains("entities_detected"), "tool returned a result: {out}");
+
+        // A hop was recorded.
+        assert_eq!(
+            server.ledger.as_ref().unwrap().lock().await.head(&server.tenant_id).unwrap().0,
+            Some(0),
+            "one MCP hop recorded"
+        );
+
+        // NO-PII: the raw value must not appear in ANY ledger DB file.
+        for entry in std::fs::read_dir(dir.path()).unwrap() {
+            let path = entry.unwrap().path();
+            let bytes = std::fs::read(&path).unwrap_or_default();
+            assert!(
+                !bytes.windows(secret.len()).any(|w| w == secret.as_bytes()),
+                "raw PII leaked into ledger file {path:?}"
+            );
         }
     }
 
