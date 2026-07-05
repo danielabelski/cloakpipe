@@ -1,0 +1,28 @@
+# Run the CloakPipe OSS proxy with one command:
+#
+#   echo "OPENAI_API_KEY=sk-..." > .env
+#   echo "CLOAKPIPE_VAULT_KEY=$(openssl rand -hex 32)" >> .env   # optional but recommended
+#   docker compose up -d
+#
+# The image bundles docker/cloakpipe.docker.toml (binds 0.0.0.0:8900, NER off so
+# no model download). Point your OpenAI SDK at http://localhost:8900/v1.
+
+services:
+  cloakpipe:
+    build: .
+    image: cloakpipe:latest
+    ports:
+      - "8900:8900"
+    volumes:
+      # The bundled config writes the vault + audit log under /data.
+      - cloakpipe-data:/data
+    environment:
+      # Upstream provider key CloakPipe forwards (required).
+      - OPENAI_API_KEY=${OPENAI_API_KEY:?set OPENAI_API_KEY in .env}
+      # 64-char hex vault key (optional; a key is auto-generated if unset).
+      - CLOAKPIPE_VAULT_KEY=${CLOAKPIPE_VAULT_KEY:-}
+      - RUST_LOG=${RUST_LOG:-cloakpipe=info,tower_http=info}
+    restart: unless-stopped
+
+volumes:
+  cloakpipe-data:
