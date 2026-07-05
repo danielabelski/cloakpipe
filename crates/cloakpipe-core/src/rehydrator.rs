@@ -41,29 +41,34 @@ impl Rehydrator {
     ) -> Result<(String, bool)> {
         buffer.push_str(chunk);
 
-        // Check if buffer contains a complete pseudo-token pattern
-        // Pattern: CATEGORY_DIGITS (e.g., ORG_7, AMOUNT_12, PERSON_5)
-        let token_pattern = regex::Regex::new(r"[A-Z]+_\d+")?;
+        // A pseudo-token is `CATEGORY_DIGITS` (e.g. ORG_7, PHONE_12). Across SSE
+        // streaming a token can arrive split into several chunks
+        // ("PH" -> "ONE" -> "_" -> "2"), so we must HOLD any trailing run that
+        // could still grow into — or already is — a token: uppercase letters, an
+        // optional underscore, and optional digits (`[A-Z]+(_\d*)?$`). Only the
+        // text before that tail is safe to flush this tick; complete tokens in
+        // the flushed prefix are rehydrated. The caller flushes the final tail
+        // when the stream ends.
+        let tail_re = regex::Regex::new(r"[A-Z]+(_\d*)?$")?;
+        let hold_at = tail_re.find(buffer).map(|m| m.start()).unwrap_or(buffer.len());
+        let flushable = buffer[..hold_at].to_string();
+        let held = buffer[hold_at..].to_string();
 
-        if let Some(mat) = token_pattern.find(buffer) {
-            // Check if the match is at the end (might be incomplete)
-            if mat.end() == buffer.len() && !chunk.ends_with(' ') && !chunk.ends_with('\n') {
-                // Token might continue in next chunk — hold buffer
-                return Ok((String::new(), false));
-            }
+        let token_re = regex::Regex::new(r"[A-Z]+_\d+")?;
+        let mut any = false;
+        let output = token_re
+            .replace_all(&flushable, |caps: &regex::Captures| {
+                match vault.lookup(&caps[0]) {
+                    Some(original) => {
+                        any = true;
+                        original.to_string()
+                    }
+                    None => caps[0].to_string(),
+                }
+            })
+            .into_owned();
 
-            // Complete token found — rehydrate it
-            let token = mat.as_str();
-            if let Some(original) = vault.lookup(token) {
-                let rehydrated = buffer.replace(token, original);
-                buffer.clear();
-                return Ok((rehydrated, true));
-            }
-        }
-
-        // No token pattern found — flush the buffer
-        let output = buffer.clone();
-        buffer.clear();
-        Ok((output, false))
+        *buffer = held;
+        Ok((output, any))
     }
 }

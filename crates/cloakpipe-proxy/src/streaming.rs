@@ -17,12 +17,15 @@ pub async fn rehydrate_stream(
         let byte_stream = response.text().await.unwrap_or_default();
 
         // Split SSE response into lines and process events
+        let mut saw_done = false;
         for line in byte_stream.lines() {
             if let Some(data) = line.strip_prefix("data: ") {
 
                 if data == "[DONE]" {
-                    yield Ok("data: [DONE]\n\n".to_string());
-                    continue;
+                    // Defer [DONE] until after the held buffer is flushed below,
+                    // so a trailing pseudo-token isn't dropped or emitted late.
+                    saw_done = true;
+                    break;
                 }
 
                 // Parse the SSE JSON chunk
@@ -70,9 +73,28 @@ pub async fn rehydrate_stream(
             }
         }
 
-        // Flush any remaining buffer
+        // Flush any pseudo-token still held in the buffer (rehydrated) as a final
+        // content chunk — otherwise a token at the very end of the stream, held
+        // awaiting more chunks, would be dropped.
         if !buffer.is_empty() {
+            let flushed = {
+                let vault_guard = vault.lock().await;
+                Rehydrator::rehydrate(&buffer, &vault_guard)
+                    .map(|r| r.text)
+                    .unwrap_or_else(|_| buffer.clone())
+            };
             tracing::debug!(request_id = %request_id, "Flushing remaining stream buffer");
+            buffer.clear();
+            if !flushed.is_empty() {
+                let chunk = serde_json::json!({
+                    "choices": [{ "index": 0, "delta": { "content": flushed } }]
+                });
+                yield Ok(format!("data: {chunk}\n\n"));
+            }
+        }
+
+        if saw_done {
+            yield Ok("data: [DONE]\n\n".to_string());
         }
     }
 }

@@ -217,3 +217,35 @@ fn test_streaming_rehydration_complete_token() {
     assert!(matched);
     assert!(output.contains("Acme Corp"));
 }
+
+#[test]
+fn test_streaming_rehydration_split_token() {
+    // Regression for #3: a pseudo-token split across SSE chunks
+    // ("PH" -> "ONE" -> "_" -> "1") must be reconstructed, not flushed piecemeal.
+    let mut vault = Vault::ephemeral();
+    let token = vault
+        .get_or_create("+15745934039", &EntityCategory::PhoneNumber)
+        .token;
+
+    // Feed the real token one char at a time, then a non-token suffix.
+    let mut fragments: Vec<String> = token.chars().map(|c| c.to_string()).collect();
+    fragments.push(" now".to_string());
+
+    let mut buffer = String::new();
+    let mut collected = String::new();
+    for frag in &fragments {
+        let (out, _) = Rehydrator::rehydrate_chunk(frag, &mut buffer, &vault).unwrap();
+        collected.push_str(&out);
+    }
+    // Flush whatever is still held at end of stream.
+    collected.push_str(&Rehydrator::rehydrate(&buffer, &vault).unwrap().text);
+
+    assert!(
+        collected.contains("+15745934039"),
+        "split token reconstructed: {collected:?}"
+    );
+    assert!(
+        !collected.contains(&token),
+        "raw pseudo-token must not remain: {collected:?}"
+    );
+}
