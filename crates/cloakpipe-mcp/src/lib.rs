@@ -2,6 +2,13 @@
 //!
 //! Tools: pseudonymize, rehydrate, detect, vault_stats, configure.
 //! Transport: stdio (for Claude Code, Cursor, etc.)
+//!
+//! Also exposes the transparent MCP interceptor ([`proxy`]) — a process that
+//! sits between an agent and an upstream MCP server, masking PII in tool calls
+//! and rehydrating results.
+
+pub mod proxy;
+pub use proxy::{run_proxy, ProxyContext};
 
 use cloakpipe_core::{
     config::{CloakPipeConfig, DetectionConfig},

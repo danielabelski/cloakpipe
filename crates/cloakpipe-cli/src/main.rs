@@ -38,6 +38,14 @@ enum Commands {
     Setup,
     /// Start as an MCP server (for agent integrations)
     Mcp,
+    /// Transparently proxy an upstream MCP server, masking PII in tool-call
+    /// arguments and rehydrating pseudonym tokens in results (M8 interceptor).
+    McpProxy {
+        /// Upstream MCP server command + args, e.g.
+        /// --upstream "npx -y @modelcontextprotocol/server-filesystem /data"
+        #[arg(long, required = true)]
+        upstream: String,
+    },
     /// CloakTree: vectorless document retrieval
     Tree {
         #[command(subcommand)]
@@ -158,6 +166,9 @@ async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
+        // Diagnostics go to stderr — stdout is reserved for program output and,
+        // for the `mcp`/`mcp-proxy` stdio servers, the JSON-RPC stream itself.
+        .with_writer(std::io::stderr)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "cloakpipe=info,tower_http=info".into()),
@@ -171,6 +182,7 @@ async fn main() -> anyhow::Result<()> {
         Commands::Init => commands::init().await,
         Commands::Setup => commands::setup().await,
         Commands::Mcp => commands::mcp(&cli.config).await,
+        Commands::McpProxy { upstream } => commands::mcp_proxy(&cli.config, upstream).await,
         Commands::Tree { action } => commands::tree(&cli.config, action).await,
         Commands::Vector { action } => commands::vector(action).await,
         Commands::Sessions { action } => commands::sessions(&cli.config, action).await,
