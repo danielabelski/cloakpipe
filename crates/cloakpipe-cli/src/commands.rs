@@ -88,8 +88,94 @@ pub async fn start(config_path: &str) -> Result<()> {
         "Starting CloakPipe proxy"
     );
 
+    // Optional CloakPipe Cloud reporting: heartbeat this instance so it shows
+    // up live in the dashboard. Runs alongside the proxy; failures are logged,
+    // never fatal.
+    if let Some(cloud) = resolve_cloud(&config) {
+        tracing::info!(url = %cloud.url, interval_s = cloud.heartbeat_seconds, "Cloud reporting on — heartbeating instance");
+        spawn_cloud_heartbeat(
+            cloud,
+            config.proxy.listen.clone(),
+            config.proxy.upstream.clone(),
+            config.profile.clone().unwrap_or_default(),
+        );
+    }
+
     let state = AppState::new(config, detector, vault, audit, api_key);
     server::start(state).await
+}
+
+/// Resolve cloud config from env (preferred) then the `[cloud]` config section.
+/// Returns `None` unless both a URL and token are present.
+fn resolve_cloud(config: &CloakPipeConfig) -> Option<cloakpipe_core::config::CloudConfig> {
+    let file = config.cloud.clone().unwrap_or_default();
+    let url = std::env::var("CLOAKPIPE_CLOUD_URL")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(file.url);
+    let token = std::env::var("CLOAKPIPE_CLOUD_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(file.token);
+    if url.is_empty() || token.is_empty() {
+        return None;
+    }
+    let heartbeat_seconds = std::env::var("CLOAKPIPE_CLOUD_HEARTBEAT_SECONDS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(file.heartbeat_seconds.max(5));
+    Some(cloakpipe_core::config::CloudConfig {
+        url,
+        token,
+        heartbeat_seconds,
+    })
+}
+
+/// Best-effort hostname for identifying this instance.
+fn detect_hostname() -> String {
+    std::env::var("HOSTNAME")
+        .ok()
+        .or_else(|| std::fs::read_to_string("/proc/sys/kernel/hostname").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "proxy".to_string())
+}
+
+/// Spawn the background loop that POSTs `/api/instances/heartbeat` on an
+/// interval. Best-effort — a failed heartbeat is logged and retried next tick.
+fn spawn_cloud_heartbeat(
+    cloud: cloakpipe_core::config::CloudConfig,
+    listen: String,
+    upstream: String,
+    profile: String,
+) {
+    tokio::spawn(async move {
+        let client = reqwest::Client::new();
+        let url = format!("{}/api/instances/heartbeat", cloud.url.trim_end_matches('/'));
+        let hostname = detect_hostname();
+        let version = env!("CARGO_PKG_VERSION");
+        let profile = if profile.is_empty() { "general".to_string() } else { profile };
+        let interval = std::time::Duration::from_secs(cloud.heartbeat_seconds.max(5));
+        loop {
+            let body = serde_json::json!({
+                "token": cloud.token,
+                "name": hostname,
+                "hostname": hostname,
+                "upstream": upstream,
+                "profile": profile,
+                "listen_addr": listen,
+                "version": version,
+            });
+            match client.post(&url).json(&body).send().await {
+                Ok(r) if r.status().is_success() => {
+                    tracing::debug!("cloud heartbeat ok")
+                }
+                Ok(r) => tracing::warn!(status = %r.status(), "cloud heartbeat rejected"),
+                Err(e) => tracing::warn!("cloud heartbeat failed: {e}"),
+            }
+            tokio::time::sleep(interval).await;
+        }
+    });
 }
 
 /// Test detection on sample text.
@@ -626,6 +712,7 @@ fn default_config() -> CloakPipeConfig {
         local: Default::default(),
         audit: Default::default(),
         session: Default::default(),
+        cloud: None,
     }
 }
 

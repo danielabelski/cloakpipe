@@ -22,6 +22,29 @@ pub struct CloakPipeConfig {
     pub audit: AuditConfig,
     #[serde(default)]
     pub session: SessionConfig,
+    /// Optional CloakPipe Cloud reporting (instance heartbeat + telemetry).
+    #[serde(default)]
+    pub cloud: Option<CloudConfig>,
+}
+
+/// Report this self-hosted proxy to CloakPipe Cloud so it shows up as a live
+/// instance and its telemetry is aggregated. Configure via `[cloud]` in the
+/// config file, or the `CLOAKPIPE_CLOUD_URL` / `CLOAKPIPE_CLOUD_TOKEN` env vars.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct CloudConfig {
+    /// Cloud API base URL, e.g. `https://api.cloakpipe.co`.
+    #[serde(default)]
+    pub url: String,
+    /// Cloud token for this agent (created in the dashboard → Cloud tokens).
+    #[serde(default)]
+    pub token: String,
+    /// Heartbeat interval in seconds (default 30, min 5).
+    #[serde(default = "default_heartbeat_seconds")]
+    pub heartbeat_seconds: u64,
+}
+
+fn default_heartbeat_seconds() -> u64 {
+    30
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
