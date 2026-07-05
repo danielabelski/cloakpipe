@@ -288,7 +288,7 @@ These are real capabilities but should not distract from v0.1-v0.5:
 |---------|----------------|
 | Token bijection (AlienLM) | Requires fine-tuning API, niche audience |
 | Vision-based CloakTree | Depends on multimodal model capabilities |
-| Browser extension (WASM) | Distribution play, not core product |
+| Browser extension (Chrome / Manifest V3) — endpoint DLP | **Companion surface, not core.** Closes the "employee pastes into chatgpt.com" gap the proxy can't reach (DOM/textarea layer). **v1:** detect + mask + warn/block on major LLM sites, log to Audit (detection via cloud API). **v2:** reversible in-page restore via Vault + policy pull + optional local WASM detection for offline. Lead-gen + endpoint-DLP; only valuable if it feeds the same Policy/Audit. See cloud `docs/ROADMAP.md → Browser Extension`. |
 | Compliance reports (SOC 2, HIPAA, GDPR) | Enterprise sales feature, not dev adoption |
 | Intel TDX / NVIDIA Confidential GPU | Nitro first, others later |
 | Covariant obfuscation (AloePri) | Requires model weight access |
