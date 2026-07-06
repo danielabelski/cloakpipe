@@ -18,6 +18,8 @@ pub mod gliner;
 pub mod gliner_pii;
 #[cfg(feature = "ner")]
 pub mod distilbert_pii;
+#[cfg(feature = "ner")]
+pub mod nemotron_pii;
 
 #[cfg(feature = "ner")]
 use crate::config::NerBackend;
@@ -37,6 +39,8 @@ pub struct Detector {
     gliner_pii_detector: Option<gliner_pii::GlinerPiiDetector>,
     #[cfg(feature = "ner")]
     distilbert_pii_detector: Option<distilbert_pii::DistilBertPiiDetector>,
+    #[cfg(feature = "ner")]
+    nemotron_pii_detector: Option<nemotron_pii::NemotronPiiDetector>,
     /// Entities to never anonymize (e.g., public companies).
     preserve_list: Vec<String>,
     /// Entities to always anonymize regardless of detection.
@@ -65,6 +69,12 @@ impl Detector {
             #[cfg(feature = "ner")]
             distilbert_pii_detector: if config.ner.enabled && matches!(config.ner.backend, NerBackend::DistilBertPii) {
                 Some(distilbert_pii::DistilBertPiiDetector::new(&config.ner)?)
+            } else {
+                None
+            },
+            #[cfg(feature = "ner")]
+            nemotron_pii_detector: if config.ner.enabled && matches!(config.ner.backend, NerBackend::NemotronPii) {
+                Some(nemotron_pii::NemotronPiiDetector::new(&config.ner)?)
             } else {
                 None
             },
@@ -120,6 +130,15 @@ impl Detector {
         #[cfg(feature = "ner")]
         if let Some(ref distilbert) = self.distilbert_pii_detector {
             entities.extend(distilbert.detect(text)?);
+        }
+
+        // Layer 3d: Nemotron-v2 PII (55 categories, MoE, ~2GB q8 — fills gaps
+        // regex misses: names/addresses/medical/financial. Regex still wins
+        // any overlap via deduplicate_spans' confidence tie-break, so it keeps
+        // owning secrets/IPs/emails that Nemotron sometimes mis-detects.)
+        #[cfg(feature = "ner")]
+        if let Some(ref nemotron) = self.nemotron_pii_detector {
+            entities.extend(nemotron.detect(text)?);
         }
 
         // Layer 3c: GLiNER-PII sidecar (names, addresses, orgs)

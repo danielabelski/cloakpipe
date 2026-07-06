@@ -148,6 +148,11 @@ pub enum NerBackend {
     /// DistilBERT PII — 63MB ONNX model, 33 entity types, runs on any CPU.
     #[serde(alias = "distilbert-pii", alias = "distilbert_pii")]
     DistilBertPii,
+    /// Nemotron-v2 PII — 1.4B param MoE, 55 entity types, q8 ONNX (~2GB), CPU.
+    /// Benchmarked F1 0.92 vs regex-only 0.65 and openai/privacy-filter base
+    /// 0.91; complements (not replaces) the regex layer — see nemotron_pii.rs.
+    #[serde(alias = "nemotron-pii", alias = "nemotron_v2", alias = "nemotron-v2")]
+    NemotronPii,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
