@@ -587,17 +587,19 @@ fn operation_meta(state: OperationState, operation_id: &str) -> Vec<(&'static st
 
 /// An operator's verdict on an operation whose outcome is unknown
 /// (`cloakpipe operations reconcile`): `done` (a retry replays) or
-/// `not_applied` (a retry runs). With a ledger, an `operation_reconciled`
+/// `not_applied` (a retry runs); an `in_flight` one only with `force` (a
+/// running gate may still get its reply). With a ledger, an `operation_reconciled`
 /// hop (release-bound when `release` is given) is appended in the same
 /// transaction: if it cannot be recorded, nothing changes.
 pub fn reconcile_operation(
     store: &mut OperationStore,
     operation_id: &str,
     outcome: OperationState,
+    force: bool,
     ledger_db: Option<&str>,
     release: Option<[u8; 32]>,
 ) -> Result<(), ReconcileError> {
-    store.reconcile(operation_id, outcome, || {
+    store.reconcile(operation_id, outcome, force, || {
         let Some(path) = ledger_db else { return Ok(()) };
         let mut ledger = LedgerStore::open(path).map_err(|e| e.to_string())?;
         let (tenant, agent) = stable_ids();

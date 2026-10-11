@@ -88,7 +88,7 @@ fn failed_and_not_applied_operations_may_be_retried() {
     assert_eq!(s.get("op-1").unwrap().unwrap().state, OperationState::InFlight);
 
     s.settle("op-1", OperationState::Unknown, None).unwrap();
-    s.reconcile("op-1", OperationState::NotApplied, || Ok(())).unwrap();
+    s.reconcile("op-1", OperationState::NotApplied, false, || Ok(())).unwrap();
     assert_eq!(s.begin("op-1", "crm.patch", &DIGEST).unwrap(), Begin::Forward);
 }
 
@@ -140,28 +140,28 @@ fn list_filters_by_state() {
 fn reconcile_settles_unknown_or_in_flight_operations_only() {
     let dir = tempfile::tempdir().unwrap();
     let mut s = open(dir.path());
-    assert_eq!(s.reconcile("op-x", OperationState::Done, || Ok(())), Err(ReconcileError::NotFound));
+    assert_eq!(s.reconcile("op-x", OperationState::Done, false, || Ok(())), Err(ReconcileError::NotFound));
 
     s.begin("op-1", "crm.patch", &DIGEST).unwrap();
     s.settle("op-1", OperationState::Unknown, None).unwrap();
-    s.reconcile("op-1", OperationState::Done, || Ok(())).unwrap();
+    s.reconcile("op-1", OperationState::Done, false, || Ok(())).unwrap();
     let row = s.get("op-1").unwrap().unwrap();
     assert_eq!(row.state, OperationState::Done);
     assert!(row.result.is_none(), "the operator supplies an outcome, not a result");
     // Already settled: refused, unchanged.
     assert_eq!(
-        s.reconcile("op-1", OperationState::NotApplied, || Ok(())),
+        s.reconcile("op-1", OperationState::NotApplied, false, || Ok(())),
         Err(ReconcileError::NotPending(OperationState::Done))
     );
 
     s.begin("op-2", "crm.patch", &OTHER).unwrap();
-    s.reconcile("op-2", OperationState::NotApplied, || Ok(())).unwrap();
+    s.reconcile("op-2", OperationState::NotApplied, true, || Ok(())).unwrap();
     assert_eq!(s.get("op-2").unwrap().unwrap().state, OperationState::NotApplied);
 
     // Only done / not_applied are outcomes.
     s.begin("op-3", "crm.patch", &[1; 32]).unwrap();
     for bad in [OperationState::Failed, OperationState::Unknown, OperationState::InFlight] {
-        assert_eq!(s.reconcile("op-3", bad, || Ok(())), Err(ReconcileError::BadOutcome));
+        assert_eq!(s.reconcile("op-3", bad, false, || Ok(())), Err(ReconcileError::BadOutcome));
     }
 }
 
@@ -171,7 +171,7 @@ fn reconcile_keeps_the_row_when_its_evidence_cannot_be_written() {
     let mut s = open(dir.path());
     s.begin("op-1", "crm.patch", &DIGEST).unwrap();
     s.settle("op-1", OperationState::Unknown, None).unwrap();
-    let err = s.reconcile("op-1", OperationState::Done, || Err("ledger unavailable".into())).unwrap_err();
+    let err = s.reconcile("op-1", OperationState::Done, false, || Err("ledger unavailable".into())).unwrap_err();
     assert_eq!(err, ReconcileError::Evidence("ledger unavailable".into()));
     assert_eq!(s.get("op-1").unwrap().unwrap().state, OperationState::Unknown);
 }
@@ -267,4 +267,27 @@ fn a_released_database_can_be_taken_by_the_next_gate() {
     first.release_gate();
     let mut second = open(dir.path());
     assert!(second.recover().is_ok());
+}
+
+/// An `in_flight` operation may still be answered by a running gate:
+/// reconciling it takes an explicit `force`. An `unknown` one does not.
+#[test]
+fn reconciling_an_in_flight_operation_needs_force() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = open(dir.path());
+    s.begin("op-1", "crm.patch", &DIGEST).unwrap();
+    let mut recorded = false;
+    assert_eq!(
+        s.reconcile("op-1", OperationState::NotApplied, false, || {
+            recorded = true;
+            Ok(())
+        }),
+        Err(ReconcileError::InFlight)
+    );
+    assert!(!recorded, "no evidence for a refused reconciliation");
+    assert_eq!(s.get("op-1").unwrap().unwrap().state, OperationState::InFlight);
+    let err = ReconcileError::InFlight.to_string();
+    assert!(err.contains("--force") && err.contains("running"), "{err}");
+    s.reconcile("op-1", OperationState::NotApplied, true, || Ok(())).unwrap();
+    assert_eq!(s.get("op-1").unwrap().unwrap().state, OperationState::NotApplied);
 }

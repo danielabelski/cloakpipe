@@ -312,7 +312,7 @@ fn a_lost_acknowledgment_is_unknown_until_reconciled_and_never_re_executed() {
     let ledger_db = dir.path().join("ledger.db");
     let mut store = OperationStore::open(dir.path().join("ops.db")).unwrap();
     let release = gate(dir.path(), task()).release_bytes();
-    reconcile_operation(&mut store, &op, OperationState::Done, ledger_db.to_str(), Some(release)).unwrap();
+    reconcile_operation(&mut store, &op, OperationState::Done, false, ledger_db.to_str(), Some(release)).unwrap();
     drop(store);
     assert_eq!(state(dir.path(), &op), OperationState::Done);
 
@@ -356,7 +356,7 @@ fn a_reconciled_not_applied_operation_runs_again() {
     let op = op_id(dir.path(), &args());
     run(dir.path(), Tool::LoseAck, gate(dir.path(), task()), &[call(1, &args())]);
     let mut store = OperationStore::open(dir.path().join("ops.db")).unwrap();
-    reconcile_operation(&mut store, &op, OperationState::NotApplied, None, None).unwrap();
+    reconcile_operation(&mut store, &op, OperationState::NotApplied, false, None, None).unwrap();
     drop(store);
     let msgs = run(dir.path(), Tool::Ok, gate(dir.path(), task()), &[call(2, &args())]);
     assert!(answer(&msgs, 2).get("result").is_some(), "{msgs:?}");
@@ -485,7 +485,7 @@ fn a_reply_to_an_operation_reconciled_meanwhile_records_no_settlement() {
     }
     // The operator decides it did not happen while the reply is still due.
     let mut store = OperationStore::open(dir.path().join("ops.db")).unwrap();
-    reconcile_operation(&mut store, &op, OperationState::NotApplied, ledger_db.to_str(), None).unwrap();
+    reconcile_operation(&mut store, &op, OperationState::NotApplied, true, ledger_db.to_str(), None).unwrap();
     drop(store);
     agent.shutdown(std::net::Shutdown::Write).unwrap();
     drop(proxy_side);
@@ -537,7 +537,7 @@ fn the_exit_sweep_leaves_an_operation_reconciled_meanwhile_alone() {
         std::thread::sleep(Duration::from_millis(10));
     }
     let mut store = OperationStore::open(dir.path().join("ops.db")).unwrap();
-    reconcile_operation(&mut store, &op, OperationState::Done, ledger_db.to_str(), None).unwrap();
+    reconcile_operation(&mut store, &op, OperationState::Done, true, ledger_db.to_str(), None).unwrap();
     drop(store);
     std::fs::write(dir.path().join("go"), b"").unwrap();
     handle.join().unwrap();

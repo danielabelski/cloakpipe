@@ -382,3 +382,22 @@ fn a_second_gate_on_a_live_operations_db_refuses_to_start() {
     run_ok(w.path(), &["operations", "reconcile", "op-lost", "--outcome", "not-applied", "--operations-db", &db]);
     assert_eq!(w.list(&["--state", "not_applied"]).len(), 1);
 }
+
+/// Reconciling an `in_flight` operation (a running gate may still get its
+/// reply) needs --force; without it the command refuses (exit 1) and warns.
+#[test]
+fn reconciling_an_in_flight_operation_needs_force() {
+    let w = world(false);
+    let db = w.ops_db();
+    let mut s = cloakpipe_mcp::operations::OperationStore::open(&db).unwrap();
+    s.begin("op-pending", "crm.patch", &[5; 32]).unwrap();
+    drop(s);
+    let (code, _, err) = cli(w.path(), &["operations", "reconcile", "op-pending", "--outcome", "not-applied", "--operations-db", &db]);
+    assert_eq!(code, 1, "{err}");
+    assert!(err.contains("in_flight") && err.contains("--force"), "{err}");
+    assert_eq!(w.list(&["--state", "in_flight"]).len(), 1, "unchanged");
+    let out = run_ok(w.path(), &["operations", "reconcile", "op-pending", "--outcome", "not-applied", "--force", "--operations-db", &db]);
+    let report: Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(report["previousState"], "in_flight");
+    assert_eq!(report["state"], "not_applied");
+}

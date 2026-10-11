@@ -7,8 +7,9 @@
 //! operator to check the system of record and reconcile it as `done` (a
 //! retry replays) or `not-applied` (a retry runs).
 //!
-//! Exit codes follow `release`: 0 ok, 1 refused (no such operation, or one
-//! that is not pending), 2 usage or I/O error.
+//! Exit codes follow `release`: 0 ok, 1 refused (no such operation, one
+//! that is not pending, or an in_flight one without `--force`), 2 usage or
+//! I/O error.
 
 use crate::cert::{invalid, usage, Res};
 use crate::release::{load_valid, EXIT_OK};
@@ -53,6 +54,10 @@ pub struct ReconcileArgs {
     /// to its release
     #[arg(long)]
     pub manifest: Option<PathBuf>,
+    /// Reconcile an in_flight operation (one a running gate may still get the
+    /// reply to). Not needed for an unknown one.
+    #[arg(long)]
+    pub force: bool,
 }
 
 pub fn run(cmd: OperationsCommands) -> i32 {
@@ -106,8 +111,11 @@ fn reconcile(a: &ReconcileArgs) -> Res<i32> {
         .ok_or_else(|| invalid(format_args!("operation {}: no such operation", a.operation_id)))?
         .state;
     let ledger = env_path(&a.ledger_db, "CLOAKPIPE_LEDGER_DB").map(|p| p.to_string_lossy().into_owned());
-    cloakpipe_mcp::reconcile_operation(&mut store, &a.operation_id, outcome, ledger.as_deref(), release).map_err(|e| match e {
-        ReconcileError::NotFound | ReconcileError::NotPending(_) | ReconcileError::BadOutcome => {
+    cloakpipe_mcp::reconcile_operation(&mut store, &a.operation_id, outcome, a.force, ledger.as_deref(), release).map_err(|e| match e {
+        ReconcileError::NotFound
+        | ReconcileError::NotPending(_)
+        | ReconcileError::InFlight
+        | ReconcileError::BadOutcome => {
             invalid(format_args!("operation {}: {e}", a.operation_id))
         }
         ReconcileError::Evidence(_) | ReconcileError::Store(_) => usage(format_args!("operation {}: {e}", a.operation_id)),

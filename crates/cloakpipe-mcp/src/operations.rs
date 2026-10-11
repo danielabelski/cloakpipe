@@ -131,6 +131,9 @@ pub enum ReconcileError {
     NotFound,
     /// The operation is not `unknown` or `in_flight`.
     NotPending(OperationState),
+    /// The operation is `in_flight` and `force` was not given: a running
+    /// gate may still receive its reply.
+    InFlight,
     /// The outcome is not `done` or `not_applied`.
     BadOutcome,
     /// The evidence for the reconciliation could not be written; nothing
@@ -146,6 +149,12 @@ impl std::fmt::Display for ReconcileError {
             ReconcileError::NotPending(s) => {
                 write!(f, "the operation is {s}; only an unknown or in_flight operation can be reconciled")
             }
+            ReconcileError::InFlight => write!(
+                f,
+                "the operation is in_flight: a running gate may still be waiting for its reply, and a verdict \
+                 now can contradict what the tool actually did. Check that no gate is running for this \
+                 operation (or that the tool's system of record is final), then pass --force"
+            ),
             ReconcileError::BadOutcome => write!(f, "the outcome must be done or not_applied"),
             ReconcileError::Evidence(e) => write!(f, "the reconciliation could not be recorded ({e}); nothing changed"),
             ReconcileError::Store(e) => write!(f, "{e}"),
@@ -353,7 +362,7 @@ impl OperationStore {
         raw.into_iter().map(to_row).collect()
     }
 
-    /// An operator's verdict on an `unknown` (or `in_flight`) operation:
+    /// An operator's verdict on an `unknown` (or, with `force`, `in_flight`) operation:
     /// `done` (it happened; a retry replays) or `not_applied` (it did not; a
     /// retry runs it). `evidence` records the reconciliation (the ledger hop)
     /// inside the transaction: if it fails, nothing changes.
@@ -361,6 +370,7 @@ impl OperationStore {
         &mut self,
         operation_id: &str,
         outcome: OperationState,
+        force: bool,
         evidence: impl FnOnce() -> Result<(), String>,
     ) -> Result<(), ReconcileError> {
         if !matches!(outcome, OperationState::Done | OperationState::NotApplied) {
@@ -373,6 +383,9 @@ impl OperationStore {
         let state: OperationState = state.ok_or(ReconcileError::NotFound)?.parse().map_err(ReconcileError::Store)?;
         if !matches!(state, OperationState::Unknown | OperationState::InFlight) {
             return Err(ReconcileError::NotPending(state));
+        }
+        if state == OperationState::InFlight && !force {
+            return Err(ReconcileError::InFlight);
         }
         evidence().map_err(ReconcileError::Evidence)?;
         tx.execute(

@@ -390,7 +390,12 @@ cloakpipe operations reconcile op-3c6d… --outcome done \
 `list` prints ids, tools, states and times only, never the call digest or
 the stored result. `reconcile` takes `--outcome done` (it took effect; a retry
 replays) or `--outcome not-applied` (it did not; a retry runs). It refuses
-(exit 1) unless the operation is `unknown` or `in_flight`. With `--ledger-db`
+(exit 1) unless the operation is `unknown` or `in_flight`, and it refuses
+an `in_flight` one (exit 1, with a warning) unless `--force` is given: a
+running proxy may still receive that call's reply, and a verdict given now
+can contradict what the tool actually did. Use `--force` only once no proxy
+can still answer the call (it has stopped, or the system of record is
+final). An `unknown` operation needs no flag. With `--ledger-db`
 (or `CLOAKPIPE_LEDGER_DB`) it records an `operation_reconciled` hop in the
 same transaction, bound to the release given by `--manifest`; if the hop
 cannot be written, nothing changes (exit 2). Neither command creates a
