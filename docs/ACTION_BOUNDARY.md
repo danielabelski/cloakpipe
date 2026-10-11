@@ -258,9 +258,132 @@ never holds the arguments or their fingerprint.
 
 A receipt is not single-use: the same approved call can run again until
 `notAfter`. Replays of one operation are handled by operation tracking
-(`sideEffect: true`, below), keyed on the receipt's `operationId`.
+(`sideEffect: true`, [below](#operations-identity-and-outcome-states)),
+keyed on the receipt's `operationId`.
 
-## Not yet available
+## Operations: identity and outcome states
 
-A contract tool with `sideEffect: true` needs operation tracking, which this
-version does not provide, so the proxy refuses to start with such a contract.
+A contract tool with `sideEffect: true` changes something outside the agent
+(a CRM record, a payment, an email). Tools fail in the middle: the effect can
+land and the reply be lost. A naive retry then does it twice. With
+`sideEffect: true`, every call is an **operation** the gate tracks in a
+durable store, so a call whose outcome is unknown is never re-run silently.
+
+### The operations store
+
+```bash
+cloakpipe mcp-proxy --upstream "npx -y @acme/crm-mcp" \
+  --manifest release.yaml --certification release.cert.dsse.json --trust key.json \
+  --tool-contract crm-tools.contract.yaml --task-context task-context.json \
+  --approvals approvals/ --approver-key approver.pub.json \
+  --operations-db operations.db
+```
+
+`--operations-db <path>` (or `CLOAKPIPE_OPERATIONS_DB=<path>`) is a SQLite
+file the operator owns:
+
+```sql
+operations(operation_id TEXT PRIMARY KEY, tool TEXT, call_digest BLOB,
+           state TEXT, result TEXT, updated_at TEXT)
+```
+
+`call_digest` is the call fingerprint and `result` the tool's result as it
+left the tool (masked, before rehydration). Both are local operator state and
+never go into the ledger. The proxy refuses to start (exit 2) when a supplied
+contract has a `sideEffect: true` tool and no operations database is given.
+Run one proxy per database.
+
+### Operation ids
+
+The model never supplies the operation id. It is the approval receipt's
+`operationId` when the tool requires approval; otherwise it is derived from
+the task and the call:
+
+```
+op- + first 32 hex of SHA-256("cloakpipe.co/operation/v1" + "\n" + taskId + "\n" + fingerprint hex)
+```
+
+So the same call in the same task is the same operation. A side-effecting call
+needs the task context's `taskId` (`task_context_missing` without it) and a
+JSON-RPC request id (a notification is refused as `request_id_missing`,
+because its outcome could never be settled).
+
+### States
+
+| State | Meaning | A retry of the same call |
+| --- | --- | --- |
+| `in_flight` | forwarded, no reply yet | refused: `reconcile_before_retry` |
+| `done` | the tool answered with a result | not forwarded: the stored result is replayed |
+| `failed` | the tool answered with `isError: true` or a JSON-RPC error | runs again |
+| `unknown` | the tool went away before answering: the effect may or may not have happened | refused: `reconcile_before_retry` |
+| `not_applied` | an operator found it did not happen | runs again |
+
+Before forwarding, the gate decides in one `BEGIN IMMEDIATE` transaction:
+
+- no row: insert it as `in_flight` and forward;
+- a row for a different call (another fingerprint or tool) under the same
+  operation id: refuse with `operation_conflict` (`-32001`);
+- `done`: do not forward. Answer with the stored result, rehydrated as a live
+  reply would be, marked `"_meta": {"cloakpipe": {"replayed": true,
+  "operationId": "…"}}`. An operation reconciled as done has no stored
+  result: the answer says it already completed;
+- `in_flight` or `unknown`: refuse with `reconcile_before_retry` and
+  JSON-RPC error code `-32002`:
+
+  ```json
+  {"jsonrpc":"2.0","id":2,"error":{"code":-32002,"message":"tool call refused by CloakPipe: reconcile_before_retry",
+   "data":{"reason":"reconcile_before_retry","operationId":"op-3c6d…","tool":"crm.patch","release":"sha256:…"}}}
+  ```
+
+- `failed` or `not_applied`: set it back to `in_flight` and forward.
+
+The JSON-RPC request id maps the reply to its operation: a `result` without
+`isError: true` settles it `done` (the result is stored); `isError: true` or a
+JSON-RPC `error` settles it `failed`. When the upstream exits or its pipe
+breaks with operations still `in_flight`, they become `unknown` and each
+waiting request gets a `-32002` error with reason `operation_unknown` and its
+`operationId`. When a proxy starts, any row a previous process left
+`in_flight` (it crashed) becomes `unknown`. Operation tracking also applies
+with `--gate warn`: it is not a release rule.
+
+Other refusals: `request_id_in_use` (a side-effecting call reusing the
+request id of a call still in flight) and `operations_unavailable` (the
+store cannot be read or written; fail closed).
+
+### Reconciling
+
+MCP has no standard way to ask a tool whether a call it never answered took
+effect, so reconciliation is an explicit operator step: check the system of
+record, then settle the operation.
+
+```bash
+cloakpipe operations list --state unknown --operations-db operations.db
+# [ { "operationId": "op-3c6d…", "tool": "crm.patch", "state": "unknown", "updatedAt": "…" } ]
+
+cloakpipe operations reconcile op-3c6d… --outcome done \
+  --operations-db operations.db --ledger-db ledger.db --manifest release.yaml
+```
+
+`list` prints ids, tools, states and times only, never the call digest or
+the stored result. `reconcile` takes `--outcome done` (it took effect; a retry
+replays) or `--outcome not-applied` (it did not; a retry runs). It refuses
+(exit 1) unless the operation is `unknown` or `in_flight`. With `--ledger-db`
+(or `CLOAKPIPE_LEDGER_DB`) it records an `operation_reconciled` hop in the
+same transaction, bound to the release given by `--manifest`; if the hop
+cannot be written, nothing changes (exit 2). Neither command creates a
+missing database (exit 2).
+
+### What the ledger records
+
+| Hop | Metadata |
+| --- | --- |
+| `mcp_tool_call` (forwarded) | `operation_id` (and `approval` for an approved call) |
+| `mcp_tool_call` (refused) | `gate_denial` (`operation_conflict`, `reconcile_before_retry`, …) and `operation_id` |
+| `mcp_tool_result` (reply) | `operation_id`, `operation_state=done` or `failed` |
+| `mcp_tool_result` (replay) | `operation_id`, `operation_state=done`, `operation_replayed=true` |
+| `mcp_tool_result` (exit or start-up sweep) | `operation_id`, `operation_state=unknown` |
+| `operation_reconciled` | `operation_id`, `operation_state=done` or `not_applied` |
+
+`operation_reconciled` is its own hop category: the verifier and the auditor
+pack count it like any other (`releaseHopsByType`). The ledger never holds
+arguments, results or fingerprints.

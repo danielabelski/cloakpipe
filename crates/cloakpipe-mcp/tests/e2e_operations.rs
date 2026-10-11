@@ -452,3 +452,34 @@ mod approvals {
         assert_eq!(meta(call_hop, "operation_id"), Some("op-crm-8"));
     }
 }
+
+/// docs/ACTION_BOUNDARY.md names the identifiers, codes and states the code uses.
+#[test]
+fn the_docs_name_what_the_code_uses() {
+    use cloakpipe_mcp::proxy::RECONCILE_REQUIRED;
+    use cloakpipe_mcp::Denial;
+    let docs = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/ACTION_BOUNDARY.md")).unwrap();
+    let op = || "op-1".to_string();
+    let denials = [
+        Denial::OperationConflict { operation_id: op() },
+        Denial::ReconcileBeforeRetry { operation_id: op() },
+        Denial::OperationsUnavailable,
+        Denial::RequestIdMissing,
+        Denial::RequestIdInUse,
+    ];
+    let mut names: Vec<String> = denials.iter().map(|d| d.code()).collect();
+    names.extend(
+        [OperationState::InFlight, OperationState::Done, OperationState::Failed, OperationState::Unknown, OperationState::NotApplied]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    names.push(cloakpipe_release::action::OPERATION_ID_DOMAIN.to_string());
+    names.push(RECONCILE_REQUIRED.to_string());
+    names.push(Hop::OperationReconciled.tag().to_string());
+    for n in ["operation_unknown", "operation_replayed", "operation_state", "--operations-db", "CLOAKPIPE_OPERATIONS_DB"] {
+        names.push(n.to_string());
+    }
+    for n in names {
+        assert!(docs.contains(&format!("`{n}`")) || docs.contains(&n), "docs/ACTION_BOUNDARY.md does not mention {n}");
+    }
+}

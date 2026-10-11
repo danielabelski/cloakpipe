@@ -39,6 +39,26 @@ may contain breaking changes; these are marked **Breaking**.
   `mcp_tool_call` hop records the receipt digest (`approval`) and
   `operation_id`, never the arguments or their fingerprint. New library API
   `ToolGate::with_approvals` and `ToolGate::authorize`.
+- **Operation identity and outcome states (action boundary).** A contract
+  tool with `sideEffect: true` now runs as a tracked operation in a SQLite
+  operations store (`cloakpipe mcp-proxy --operations-db`, or
+  `CLOAKPIPE_OPERATIONS_DB`; required for such tools, so the proxy refuses to
+  start without it). The operation id is the approval receipt's
+  `operationId`, else derived from the task and the call
+  (`cloakpipe.co/operation/v1`); the model never supplies it. States
+  `in_flight`, `done`, `failed`, `unknown` and `not_applied`: a retry of a
+  `done` call replays the stored result (`_meta.cloakpipe.replayed`), a call
+  whose reply was lost (upstream exit, broken pipe, crash) becomes `unknown`
+  and retries are refused with `reconcile_before_retry` (JSON-RPC `-32002`)
+  until an operator runs the new `cloakpipe operations reconcile <id>
+  --outcome done|not-applied` (`cloakpipe operations list` shows them).
+  New denial reasons `operation_conflict`, `reconcile_before_retry`,
+  `request_id_missing`, `request_id_in_use` and `operations_unavailable`.
+  Ledger hops carry `operation_id` and `operation_state`, and a new hop
+  category `operation_reconciled` (`Hop::OperationReconciled`) records each
+  reconciliation; the verifier and audit pack count it by type. New library
+  API `cloakpipe_mcp::operations`, `ToolGate::with_operations`,
+  `ToolGate::ready` and `cloakpipe_mcp::reconcile_operation`.
 - **Agent Release manifests.** A new `cloakpipe-release` crate gives an AI agent
   release an exact, verifiable identity: an `AgentRelease` manifest that only
   accepts immutable references, a canonical hash (RFC 8785), a material-change

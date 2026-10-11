@@ -302,7 +302,13 @@ exact call may run, checked on the raw arguments before masking. Reasons
 signed approval receipt for the exact call (`--approvals`,
 `--approver-key`; receipts from `cloakpipe approve`): reasons
 `approval_required`, `approval_invalid` and `approval_expired`; an approved
-call's hop carries the receipt digest (`approval`) and `operation_id`. See
+call's hop carries the receipt digest (`approval`) and `operation_id`. A
+contract tool with `sideEffect: true` runs as a tracked operation
+(`--operations-db`): a completed call is replayed rather than re-run,
+conflicting calls under one operation id are refused (`operation_conflict`),
+and a call whose outcome was lost is refused (`reconcile_before_retry`,
+JSON-RPC `-32002`) until `cloakpipe operations reconcile` settles it, which
+records an `operation_reconciled` hop. See
 [ACTION_BOUNDARY.md](ACTION_BOUNDARY.md).
 
 `--gate enforce` (default): a refused call never reaches the upstream tool.

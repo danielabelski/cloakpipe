@@ -299,7 +299,12 @@ as `scope_mismatch`. The contract's digest is bound in the release, so it is
 certified with it. A tool marked `requiresApproval: true` runs only with a
 signed approval receipt for that exact call (`cloakpipe approve`, then
 `--approvals approvals/ --approver-key approver.json`); change one argument
-and it needs a new approval. See [docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md) and
+and it needs a new approval. A tool marked `sideEffect: true` runs as a tracked
+operation (`--operations-db operations.db`): a retry of a completed call replays
+its result instead of running it twice, and a call whose reply was lost stays
+`unknown` (retries refused as `reconcile_before_retry`) until an operator checks
+the system of record and runs `cloakpipe operations reconcile <id> --outcome
+done|not-applied`. See [docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md) and
 [examples/action-boundary](examples/action-boundary).
 
 With `CLOAKPIPE_LEDGER_DB` set, every call, result and refusal is recorded as a
