@@ -8,9 +8,10 @@
 //! and rehydrating results.
 
 pub mod gate;
+pub mod operations;
 pub mod proxy;
-pub use gate::{Denial, GateMode, ToolGate};
-pub use proxy::{run_proxy, run_proxy_io, stable_ids, ProxyContext};
+pub use gate::{ApprovedCall, Authorization, Denial, GateConfigError, GateMode, OperationKey, ToolGate};
+pub use proxy::{reconcile_operation, run_proxy, run_proxy_io, stable_ids, ProxyContext};
 
 use cloakpipe_core::{
     config::{CloakPipeConfig, DetectionConfig},

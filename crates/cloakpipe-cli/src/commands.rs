@@ -433,11 +433,15 @@ fn release_from_var(v: Result<String, std::env::VarError>) -> Result<Option<[u8;
 /// tokens in the results before the agent sees them. Set `CLOAKPIPE_LEDGER_DB`
 /// to record a no-PII evidence hop per call/result, and `CLOAKPIPE_RELEASE`
 /// (`sha256:<hex>` from `cloakpipe release hash`) to bind each hop to the
-/// Agent Release being run.
+/// Agent Release being run. `--tool-contract` / `--task-context` add
+/// argument-level rules (docs/ACTION_BOUNDARY.md).
 pub async fn mcp_proxy(config_path: &str, args: crate::cert::McpProxyArgs) -> Result<()> {
-    // Configuration errors are already on stderr; fail before spawning anything.
-    let gate = crate::cert::gate_from_args(&args)
-        .map_err(|code| anyhow::anyhow!("invalid mcp-proxy release gate configuration (exit {code})"))?;
+    // Configuration errors are already on stderr; fail before spawning
+    // anything, with the documented exit code (1 invalid input, 2 usage).
+    let gate = match crate::cert::gate_from_args(&args) {
+        Ok(gate) => gate,
+        Err(code) => std::process::exit(code),
+    };
     let upstream = args.upstream;
     let config = if std::path::Path::new(config_path).exists() {
         load_config(config_path)?

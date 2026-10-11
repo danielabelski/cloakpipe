@@ -1,0 +1,24 @@
+# A tool contract: argument-level rules for the CRM tools the release may call.
+# Bound into the release through spec.policies as
+#   policy:tool-contract/crm-tools@sha256:<digest>
+# (the digest is printed by `cloakpipe mcp-proxy` when it refuses to start).
+apiVersion: cloakpipe.co/v1alpha1
+kind: ToolContract
+metadata:
+  name: crm-tools
+spec:
+  tools:
+    crm.patch:
+      sideEffect: true          # track operation outcomes
+      requiresApproval: true    # needs a signed approval receipt
+      arguments:                # closed by default: unknown argument -> denial
+        tenant: { bindTo: task.tenant }
+        record: { bindTo: task.record }
+        patch:
+          type: object
+          minProperties: 1
+          additionalProperties: false
+          properties:
+            stage: { enum: [qualified, review] }
+            note:  { type: string, maxLength: 280 }
+      required: [tenant, record, patch]

@@ -11,6 +11,59 @@ may contain breaking changes; these are marked **Breaking**.
 
 ### Added
 
+- **Tool contracts (action boundary).** A new `kind: ToolContract` artifact
+  (`cloakpipe_release::contract`, `schemas/tool-contract.schema.json`) gives
+  argument-level rules for the tools a release calls: closed argument lists,
+  a small deterministic subset of JSON Schema, and `bindTo: task.<key>` to pin
+  an argument to a trusted task context. A release binds a contract in
+  `spec.policies` as `policy:tool-contract/<name>@sha256:<digest>`, so it is
+  covered by the certified release hash. `cloakpipe mcp-proxy` takes
+  `--tool-contract` (repeatable) and `--task-context` (or
+  `CLOAKPIPE_TASK_CONTEXT`), refuses to start unless the contracts are exactly
+  the ones the release binds, and checks each covered call's raw arguments
+  before masking. New denial reasons `argument_missing`,
+  `argument_not_allowed`, `argument_invalid`, `scope_mismatch`,
+  `task_context_missing` and `approval_required`; denial hops carry the
+  contract path as `gate_path`. See `docs/ACTION_BOUNDARY.md` and
+  `examples/action-boundary/`.
+- **Signed approval receipts (action boundary).** A contract tool with
+  `requiresApproval: true` now runs only with a signed receipt for the exact
+  call: an in-toto Statement (predicate type
+  `https://cloakpipe.co/attestations/approval/v1alpha1`) in a DSSE envelope
+  whose subject is the call fingerprint, SHA-256 over
+  `cloakpipe.co/tool-call/v1` and the JCS of `{release, tool, arguments}`
+  (`cloakpipe_release::action`, `cloakpipe_cert::approval`). New commands
+  `cloakpipe action fingerprint` and `cloakpipe approve`; `cloakpipe
+  mcp-proxy` takes `--approvals <dir>` and `--approver-key` (repeatable). New
+  denial reasons `approval_invalid` and `approval_expired`; an approved call's
+  `mcp_tool_call` hop records the receipt digest (`approval`) and
+  `operation_id`, never the arguments or their fingerprint. New library API
+  `ToolGate::with_approvals` and `ToolGate::authorize`.
+- **Operation identity and outcome states (action boundary).** A contract
+  tool with `sideEffect: true` now runs as a tracked operation in a SQLite
+  operations store (`cloakpipe mcp-proxy --operations-db`, or
+  `CLOAKPIPE_OPERATIONS_DB`; required for such tools, so the proxy refuses to
+  start without it). The operation id is the approval receipt's
+  `operationId`, else derived from the task and the call
+  (`cloakpipe.co/operation/v1`, an HMAC keyed by the operations database's
+  own random key, so the ledger's ids cannot be used to guess arguments);
+  the model never supplies it. States
+  `in_flight`, `done`, `failed`, `unknown` and `not_applied`: a retry of a
+  `done` call replays the stored result (`_meta.cloakpipe.replayed`), a call
+  whose reply was lost (upstream exit, broken pipe, crash) becomes `unknown`
+  and retries are refused with `reconcile_before_retry` (JSON-RPC `-32002`)
+  until an operator runs the new `cloakpipe operations reconcile <id>
+  --outcome done|not-applied` (`cloakpipe operations list` shows them;
+  an `in_flight` operation needs `--force`). One proxy per operations
+  database: a running proxy holds `<db>.lock`, and a second one refuses to
+  start. A new operations database is created `0600` on unix.
+  New denial reasons `operation_conflict`, `reconcile_before_retry`,
+  `request_id_missing`, `request_id_in_use` and `operations_unavailable`.
+  Ledger hops carry `operation_id` and `operation_state`, and a new hop
+  category `operation_reconciled` (`Hop::OperationReconciled`) records each
+  reconciliation; the verifier and audit pack count it by type. New library
+  API `cloakpipe_mcp::operations`, `ToolGate::with_operations`,
+  `ToolGate::ready` and `cloakpipe_mcp::reconcile_operation`.
 - **Agent Release manifests.** A new `cloakpipe-release` crate gives an AI agent
   release an exact, verifiable identity: an `AgentRelease` manifest that only
   accepts immutable references, a canonical hash (RFC 8785), a material-change
@@ -98,6 +151,10 @@ may contain breaking changes; these are marked **Breaking**.
 
 ### Changed
 
+- **Breaking (library):** `cloakpipe_mcp::ToolGate::check` takes the call's
+  raw arguments (`check(tool, arguments, now)`), and `Denial` has new variants.
+  `cloakpipe mcp-proxy` gate configuration errors now exit with the documented
+  codes (2 usage, 1 invalid input) instead of 1.
 - **Breaking:** format identifiers moved from the legacy `cloakpipe.dev`
   namespace to `cloakpipe.co` (for example `apiVersion: cloakpipe.co/v1alpha1`,
   hash and signing domains, in-toto predicate types and the schema `$id`).

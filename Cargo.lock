@@ -634,7 +634,9 @@ dependencies = [
  "cloakpipe-verify",
  "ed25519-dalek",
  "hex",
+ "rand 0.8.6",
  "rmcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
@@ -674,8 +676,10 @@ name = "cloakpipe-release"
 version = "0.10.0"
 dependencies = [
  "hex",
+ "hmac",
  "jsonschema",
  "proptest",
+ "regex",
  "serde",
  "serde_json",
  "serde_json_canonicalizer",

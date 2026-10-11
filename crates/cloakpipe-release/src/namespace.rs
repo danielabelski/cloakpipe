@@ -33,6 +33,18 @@ pub const LEGACY_EVALUATION_RUN_HASH_DOMAIN: &str = "cloakpipe.dev/evaluation-ru
 pub const CERTIFICATION_POLICY_HASH_DOMAIN: &str = "cloakpipe.co/certification-policy/v1";
 pub const LEGACY_CERTIFICATION_POLICY_HASH_DOMAIN: &str = "cloakpipe.dev/certification-policy/v1";
 
+/// Domain separator of the tool contract digest.
+pub const TOOL_CONTRACT_HASH_DOMAIN: &str = "cloakpipe.co/tool-contract/v1";
+pub const LEGACY_TOOL_CONTRACT_HASH_DOMAIN: &str = "cloakpipe.dev/tool-contract/v1";
+
+/// Domain separator of the tool-call fingerprint (approval receipts). New in
+/// `cloakpipe.co`: there are no legacy fingerprints.
+pub const TOOL_CALL_FINGERPRINT_DOMAIN: &str = "cloakpipe.co/tool-call/v1";
+
+/// Domain separator of a derived operation id (operations without an
+/// approval receipt). New in `cloakpipe.co`.
+pub const OPERATION_ID_DOMAIN: &str = "cloakpipe.co/operation/v1";
+
 /// Domain separator of a release audit pack's signing input.
 pub const RELEASE_AUDIT_PACK_SIGNING_DOMAIN: &str = "cloakpipe.co/release-audit-pack/v1alpha1";
 pub const LEGACY_RELEASE_AUDIT_PACK_SIGNING_DOMAIN: &str = "cloakpipe.dev/release-audit-pack/v1alpha1";
@@ -45,9 +57,16 @@ pub const LEGACY_AGENT_RELEASE_PREDICATE_TYPE: &str = "https://cloakpipe.dev/att
 pub const CERTIFICATION_PREDICATE_TYPE: &str = "https://cloakpipe.co/attestations/certification/v1alpha1";
 pub const LEGACY_CERTIFICATION_PREDICATE_TYPE: &str = "https://cloakpipe.dev/attestations/certification/v1alpha1";
 
+/// in-toto `predicateType` of a signed approval receipt. New in
+/// `cloakpipe.co`: there are no legacy receipts.
+pub const APPROVAL_PREDICATE_TYPE: &str = "https://cloakpipe.co/attestations/approval/v1alpha1";
+
 /// `$id` of `schemas/agent-release.schema.json`.
 pub const AGENT_RELEASE_SCHEMA_ID: &str = "https://cloakpipe.co/schemas/agent-release/v1alpha1.json";
 pub const LEGACY_AGENT_RELEASE_SCHEMA_ID: &str = "https://cloakpipe.dev/schemas/agent-release/v1alpha1.json";
+
+/// `$id` of `schemas/tool-contract.schema.json`.
+pub const TOOL_CONTRACT_SCHEMA_ID: &str = "https://cloakpipe.co/schemas/tool-contract/v1alpha1.json";
 
 /// Which namespace an identifier belongs to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -87,6 +106,10 @@ impl Namespace {
 
     pub fn certification_policy_hash_domain(self) -> &'static str {
         self.pick(CERTIFICATION_POLICY_HASH_DOMAIN, LEGACY_CERTIFICATION_POLICY_HASH_DOMAIN)
+    }
+
+    pub fn tool_contract_hash_domain(self) -> &'static str {
+        self.pick(TOOL_CONTRACT_HASH_DOMAIN, LEGACY_TOOL_CONTRACT_HASH_DOMAIN)
     }
 
     pub fn release_audit_pack_signing_domain(self) -> &'static str {

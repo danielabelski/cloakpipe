@@ -1,0 +1,26 @@
+# The Agent Release that binds crm-tools.contract.yaml. The contract digest is
+# part of spec.policies, so it is covered by the certified release hash.
+apiVersion: cloakpipe.co/v1alpha1
+kind: AgentRelease
+metadata:
+  agent: crm-agent
+  version: "7"
+spec:
+  code:
+    repository: acme/crm-agent
+    commit: 3c1d9e0
+  prompts:
+    - ref: prompt:crm-assistant@12
+  model:
+    ref: model:openai/gpt-5@2026-08-01
+  tools:
+    - ref: tool:crm.patch@3
+    - ref: tool:crm.lookup@3
+  mcpServers:
+    - ref: mcp:crm@12
+  policies:
+    - ref: policy:crm-prod@4
+    - ref: policy:tool-contract/crm-tools@sha256:27dfd9d14c9344b6c4364a22a159276f0aa4af6b3adc4b4e995828437cac9a2b
+  runtime:
+    image: registry.acme.dev/crm-agent@sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08
+    region: in-south

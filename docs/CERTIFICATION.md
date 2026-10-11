@@ -403,6 +403,24 @@ cloakpipe mcp-proxy --upstream "npx -y @acme/crm-mcp" \
   --trust-key "$KEYID=$PUBHEX" --environment production
 ```
 
+A release can also bind **tool contracts** (`--tool-contract`, with a
+trusted `--task-context`): argument-level rules that decide whether this
+exact call may run, checked on the raw arguments before masking. Reasons
+`argument_missing`, `argument_not_allowed`, `argument_invalid`,
+`scope_mismatch` and `task_context_missing` carry the contract path as
+`gate_path`. A contract tool with `requiresApproval: true` also needs a
+signed approval receipt for the exact call (`--approvals`,
+`--approver-key`; receipts from `cloakpipe approve`): reasons
+`approval_required`, `approval_invalid` and `approval_expired`; an approved
+call's hop carries the receipt digest (`approval`) and `operation_id`. A
+contract tool with `sideEffect: true` runs as a tracked operation
+(`--operations-db`): a completed call is replayed rather than re-run,
+conflicting calls under one operation id are refused (`operation_conflict`),
+and a call whose outcome was lost is refused (`reconcile_before_retry`,
+JSON-RPC `-32002`) until `cloakpipe operations reconcile` settles it, which
+records an `operation_reconciled` hop. See
+[ACTION_BOUNDARY.md](ACTION_BOUNDARY.md).
+
 `--gate enforce` (default): a refused call never reaches the upstream tool.
 The agent receives JSON-RPC error `-32001` with
 `data: {reason, tool, release}` (notifications get no reply). Reasons:

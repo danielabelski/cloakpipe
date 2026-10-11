@@ -1,9 +1,11 @@
 //! CloakPipe CLI — entrypoint for the privacy proxy.
 
+mod action;
 mod anchor;
 mod audit_pack;
 mod cert;
 mod commands;
+mod operations;
 mod release;
 
 use clap::{Parser, Subcommand};
@@ -68,6 +70,18 @@ enum Commands {
     /// Seal an exported evidence bundle under a signed batch head and anchor it
     /// externally (RFC 3161 TSA and/or Sigstore Rekor); see docs/ANCHORING.md
     Anchor(anchor::AnchorArgs),
+    /// Tool calls at the action boundary: print a call's fingerprint
+    Action {
+        #[command(subcommand)]
+        action: action::ActionCommands,
+    },
+    /// Sign an approval receipt for one exact tool call (for mcp-proxy --approvals)
+    Approve(action::ApproveArgs),
+    /// Side-effecting tool calls tracked by mcp-proxy --operations-db: list, reconcile
+    Operations {
+        #[command(subcommand)]
+        action: operations::OperationsCommands,
+    },
     /// Evaluation runs: import external results as certification evidence
     Eval {
         #[command(subcommand)]
@@ -183,6 +197,9 @@ fn main() -> anyhow::Result<()> {
         Commands::Release { action } => std::process::exit(release::run(action)),
         Commands::Eval { action } => std::process::exit(cert::eval(action)),
         Commands::Anchor(args) => std::process::exit(anchor::run(args)),
+        Commands::Action { action } => std::process::exit(action::run(action)),
+        Commands::Approve(args) => std::process::exit(action::approve(args)),
+        Commands::Operations { action } => std::process::exit(operations::run(action)),
         other => other,
     };
 
@@ -211,7 +228,12 @@ async fn run(command: Commands, config: String) -> anyhow::Result<()> {
         Commands::Tree { action } => commands::tree(&config, action).await,
         Commands::Vector { action } => commands::vector(action).await,
         Commands::Sessions { action } => commands::sessions(&config, action).await,
-        Commands::Release { .. } | Commands::Eval { .. } | Commands::Anchor(_) => unreachable!("handled above"),
+        Commands::Release { .. }
+        | Commands::Eval { .. }
+        | Commands::Anchor(_)
+        | Commands::Action { .. }
+        | Commands::Approve(_)
+        | Commands::Operations { .. } => unreachable!("handled above"),
         Commands::Scan { input, output, strategy, detect_only, min_confidence } => {
             commands::scan(&config, input, output, strategy, detect_only, min_confidence).await
         }

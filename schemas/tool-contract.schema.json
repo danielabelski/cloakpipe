@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://cloakpipe.co/schemas/tool-contract/v1alpha1.json",
+  "title": "CloakPipe Tool Contract",
+  "description": "Argument-level rules for the tools an Agent Release may call. Bound into a release through spec.policies as `policy:tool-contract/<name>@sha256:<digest>`, where the digest is SHA-256 over `cloakpipe.co/tool-contract/v1` + \"\\n\" + the RFC 8785 encoding of this document. Arguments are closed: a call may carry only the arguments a tool lists. Semantic checks the schema cannot express (required names must be declared, keywords must match the constraint's type, a constraint must restrict something, patterns must compile, duplicate keys) are enforced by the CloakPipe reader.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {
+      "description": "Writers emit `cloakpipe.co/v1alpha1`; `cloakpipe.dev/v1alpha1` is still accepted.",
+      "enum": ["cloakpipe.co/v1alpha1", "cloakpipe.dev/v1alpha1"]
+    },
+    "kind": { "const": "ToolContract" },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]*$" }
+      }
+    },
+    "spec": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tools"],
+      "properties": {
+        "tools": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": { "minLength": 1 },
+          "additionalProperties": { "$ref": "#/$defs/tool" }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "tool": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sideEffect": { "type": "boolean", "description": "The call changes state outside the agent; its outcome is tracked." },
+        "requiresApproval": { "type": "boolean", "description": "The call needs a signed approval receipt." },
+        "arguments": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/constraint" }
+        },
+        "required": { "$ref": "#/$defs/names" }
+      }
+    },
+    "names": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
+    "count": { "type": "integer", "minimum": 0 },
+    "constraint": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "type": { "enum": ["string", "integer", "number", "boolean", "object", "array", "null"] },
+        "enum": { "type": "array", "minItems": 1 },
+        "const": true,
+        "minLength": { "$ref": "#/$defs/count" },
+        "maxLength": { "$ref": "#/$defs/count" },
+        "pattern": { "type": "string", "description": "Matched against the whole string (anchored)." },
+        "minimum": { "type": "number" },
+        "maximum": { "type": "number" },
+        "properties": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/constraint" }
+        },
+        "required": { "$ref": "#/$defs/names" },
+        "additionalProperties": { "type": "boolean", "description": "Default false." },
+        "minProperties": { "$ref": "#/$defs/count" },
+        "maxProperties": { "$ref": "#/$defs/count" },
+        "items": { "$ref": "#/$defs/constraint" },
+        "minItems": { "$ref": "#/$defs/count" },
+        "maxItems": { "$ref": "#/$defs/count" },
+        "bindTo": {
+          "type": "string",
+          "pattern": "^task\\.[^.]+(\\.[^.]+)*$",
+          "description": "The value must equal the trusted task context's value at this key."
+        }
+      }
+    }
+  }
+}
