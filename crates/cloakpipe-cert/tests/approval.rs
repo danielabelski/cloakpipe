@@ -252,3 +252,19 @@ fn arguments_with_duplicate_keys_are_refused() {
     assert!(parse_json_strict(r#"{"a": {"b": 1, "b": 1}}"#).is_err());
     assert!(parse_json_strict("{").is_err());
 }
+
+#[test]
+fn the_docs_name_the_identifiers_the_code_uses() {
+    let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/ACTION_BOUNDARY.md")).unwrap();
+    for id in [
+        APPROVAL_PREDICATE_TYPE,
+        cloakpipe_release::action::TOOL_CALL_FINGERPRINT_DOMAIN,
+        "<fingerprint hex>.approval.json",
+        "approval_required",
+        "approval_invalid",
+        "approval_expired",
+    ] {
+        assert!(doc.contains(id), "docs/ACTION_BOUNDARY.md does not mention {id}");
+    }
+    assert!(doc.contains(&format!("no more than {CLOCK_SKEW_SECS} seconds ahead")), "the skew allowance in the docs");
+}

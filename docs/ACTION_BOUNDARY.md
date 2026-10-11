@@ -135,7 +135,9 @@ covers behave as before. Refusals use the usual JSON-RPC error `-32001`:
 | `argument_invalid` | a value breaks its constraint, or the arguments are not an object | the contract path |
 | `scope_mismatch` | a `bindTo` value differs from the task context | the argument |
 | `task_context_missing` | a `bindTo` needs a task context, or a key it does not have | the argument |
-| `approval_required` | the tool has `requiresApproval: true` | — |
+| `approval_required` | the tool has `requiresApproval: true` and there is no receipt for this exact call | — |
+| `approval_invalid` | the receipt is malformed, not signed by a trusted approver, or for another release, tool, task or call | — |
+| `approval_expired` | the receipt's `notAfter` has passed | — |
 | `contract_missing` | the release binds a contract the gate was not given (library use only; the CLI refuses to start) | — |
 
 Checks run in a fixed order whatever the order of the arguments: unknown
@@ -148,9 +150,117 @@ opaque-id check rejects a path (a property named `phone`, say), the hop is
 still recorded with `gate_denial` alone. `--gate warn` forwards the call and
 records `gate_violation` and `gate_path`.
 
-### Not yet available
+## Approval receipts
 
-`requiresApproval: true` tools are refused (`approval_required`) until signed
-approval receipts are supported. A contract tool with `sideEffect: true`
-needs operation tracking, which this version does not provide, so the proxy
-refuses to start with such a contract.
+A contract tool with `requiresApproval: true` runs only with a signed approval
+receipt for **this exact call**. A person (or a system acting for one) approves
+the call out of band; the gate checks the receipt offline.
+
+### The call fingerprint
+
+A receipt is about one call, identified by its fingerprint:
+
+```
+SHA-256( "cloakpipe.co/tool-call/v1" || "\n" ||
+         JCS({"release": "sha256:<release hash>", "tool": "<name>", "arguments": <raw arguments>}) )
+```
+
+The arguments are the raw ones, exactly as the agent sends them (key order
+and whitespace do not matter, but every value does; no Unicode
+normalisation). Any change to the arguments is a different call, which has no
+receipt. Print it with:
+
+```bash
+cloakpipe action fingerprint --manifest release.yaml --tool crm.patch --args call.json
+# sha256:5b0c…
+```
+
+The fingerprint is a plain hash of the arguments, so low-entropy values could
+be recovered from it by brute force. It names receipt files and stays with the
+operator; it is never written to the ledger.
+
+### Signing a receipt
+
+Approver keys are ordinary CloakPipe signing keys (`cloakpipe release keygen
+--out approver.json`).
+
+```bash
+cloakpipe approve --manifest release.yaml --tool crm.patch --args call.json \
+  --task-context task-context.json --key approver.json \
+  [--expires 15m] [--operation-id <id>] --out approvals/
+```
+
+This writes `approvals/<fingerprint hex>.approval.json` and prints the
+receipt path, the fingerprint, the receipt digest (`sha256` of the file
+bytes), the operation id, the approver and `notAfter`. `--expires` takes
+`<n>s`, `<n>m`, `<n>h` or `<n>d` (default `15m`). `--operation-id` defaults
+to a fresh UUID v4; an explicit one is 1 to 128 ASCII letters, digits, `-`,
+`_`, `.` or `:`. The tool must be declared by the release, the arguments must
+be JSON without duplicate keys, and the task context must carry a string
+`taskId`.
+
+The receipt is a DSSE envelope (`payloadType`
+`application/vnd.in-toto+json`, Ed25519, the same envelope as a
+certification) around an in-toto Statement:
+
+```json
+{ "_type": "https://in-toto.io/Statement/v1",
+  "subject": [{ "name": "tool-call:crm.patch", "digest": { "sha256": "<fingerprint hex>" } }],
+  "predicateType": "https://cloakpipe.co/attestations/approval/v1alpha1",
+  "predicate": { "release": "sha256:…", "tool": "crm.patch", "taskId": "t-981",
+                 "operationId": "2b0f8f9e-…", "approver": "ed25519:…",
+                 "approvedAt": "2026-10-11T11:55:00Z", "notAfter": "2026-10-11T12:10:00Z" } }
+```
+
+`approver` is the keyid of the signing key.
+
+### Running the gate with approvals
+
+```bash
+cloakpipe mcp-proxy --upstream "npx -y @acme/crm-mcp" \
+  --manifest release.yaml --certification release.cert.dsse.json --trust key.json \
+  --tool-contract crm-tools.contract.yaml --task-context task-context.json \
+  --approvals approvals/ --approver-key approver.pub.json
+```
+
+`--approver-key` is repeatable and takes a key file (the public part is
+enough). `--approvals` and `--approver-key` must be given together, and the
+directory must exist; otherwise the proxy refuses to start (exit 2). Without
+them every call to an approval-gated tool is refused as `approval_required`.
+
+For such a call, after the contract checks pass (an approval never widens the
+contract), the gate computes the fingerprint, reads
+`<fingerprint hex>.approval.json` and accepts it only if:
+
+- a signature verifies under a trusted approver key with a matching keyid,
+  and `approver` is that keyid;
+- the subject digest is the recomputed fingerprint, and `release`, `tool` and
+  `taskId` equal the gate's release, the called tool and the task context's
+  `taskId`;
+- `operationId` is a valid operation id, both times are RFC 3339 and
+  `notAfter` is after `approvedAt`;
+- `approvedAt` is no more than 60 seconds ahead of the gate's clock (the same
+  allowance as `cloakpipe anchor --clock-skew-secs`), and `notAfter` has not
+  passed.
+
+No file means `approval_required`. A file that fails any check is
+`approval_invalid`, except a receipt whose only fault is a passed `notAfter`,
+which is `approval_expired`. A task context with no `taskId` cannot match any
+receipt: `task_context_missing`.
+
+### What the ledger records
+
+On an approved call, the `mcp_tool_call` hop carries
+`approval=<sha256 of the receipt file bytes>` (a hash value) and
+`operation_id=<the receipt's operationId>`. The receipt itself stays with the
+operator: an auditor holding it hashes the file and finds the hop. The ledger
+never holds the arguments or their fingerprint.
+
+A receipt is not single-use: the same approved call can run again until
+`notAfter`. Replays of one operation are handled by operation tracking
+(`sideEffect: true`, below), keyed on the receipt's `operationId`.
+
+## Not yet available
+
+A contract tool with `sideEffect: true` needs operation tracking, which this
+version does not provide, so the proxy refuses to start with such a contract.

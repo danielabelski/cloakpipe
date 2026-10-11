@@ -26,6 +26,19 @@ may contain breaking changes; these are marked **Breaking**.
   `task_context_missing` and `approval_required`; denial hops carry the
   contract path as `gate_path`. See `docs/ACTION_BOUNDARY.md` and
   `examples/action-boundary/`.
+- **Signed approval receipts (action boundary).** A contract tool with
+  `requiresApproval: true` now runs only with a signed receipt for the exact
+  call: an in-toto Statement (predicate type
+  `https://cloakpipe.co/attestations/approval/v1alpha1`) in a DSSE envelope
+  whose subject is the call fingerprint, SHA-256 over
+  `cloakpipe.co/tool-call/v1` and the JCS of `{release, tool, arguments}`
+  (`cloakpipe_release::action`, `cloakpipe_cert::approval`). New commands
+  `cloakpipe action fingerprint` and `cloakpipe approve`; `cloakpipe
+  mcp-proxy` takes `--approvals <dir>` and `--approver-key` (repeatable). New
+  denial reasons `approval_invalid` and `approval_expired`; an approved call's
+  `mcp_tool_call` hop records the receipt digest (`approval`) and
+  `operation_id`, never the arguments or their fingerprint. New library API
+  `ToolGate::with_approvals` and `ToolGate::authorize`.
 - **Agent Release manifests.** A new `cloakpipe-release` crate gives an AI agent
   release an exact, verifiable identity: an `AgentRelease` manifest that only
   accepts immutable references, a canonical hash (RFC 8785), a material-change

@@ -298,7 +298,12 @@ trusted `--task-context`): argument-level rules that decide whether this
 exact call may run, checked on the raw arguments before masking. Reasons
 `argument_missing`, `argument_not_allowed`, `argument_invalid`,
 `scope_mismatch` and `task_context_missing` carry the contract path as
-`gate_path`. See [ACTION_BOUNDARY.md](ACTION_BOUNDARY.md).
+`gate_path`. A contract tool with `requiresApproval: true` also needs a
+signed approval receipt for the exact call (`--approvals`,
+`--approver-key`; receipts from `cloakpipe approve`): reasons
+`approval_required`, `approval_invalid` and `approval_expired`; an approved
+call's hop carries the receipt digest (`approval`) and `operation_id`. See
+[ACTION_BOUNDARY.md](ACTION_BOUNDARY.md).
 
 `--gate enforce` (default): a refused call never reaches the upstream tool.
 The agent receives JSON-RPC error `-32001` with
