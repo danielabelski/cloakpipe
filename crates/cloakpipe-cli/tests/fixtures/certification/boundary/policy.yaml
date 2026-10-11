@@ -1,0 +1,11 @@
+apiVersion: cloakpipe.co/v1alpha1
+kind: CertificationPolicy
+name: support-prod
+version: "12"
+validityDays: 30
+rules:
+  minCoverage: 1.0
+  boundary:
+    suites: [authorization, access_control, side_effect]
+    minDenyRate: 1.0
+    minAllowRate: 0.9

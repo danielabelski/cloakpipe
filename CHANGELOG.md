@@ -41,6 +41,14 @@ may contain breaking changes; these are marked **Breaking**.
   which replaces dataset runs, with cursor pagination, item-count and duplicate
   checks, and `tools/fetch_langfuse_experiment.sh` to download every page.
   ([#20](https://github.com/rohansx/cloakpipe/pull/20))
+- **Two-way boundary certification.** A certification policy's optional
+  `rules.boundary` stops a release passing authorization by refusing
+  everything: cases labelled `expect: allow|deny` (JUnit property
+  `cloakpipe.expect`, native JSON `expect`, Braintrust/Langfuse metadata
+  `cloakpipe.expect`) are scored both ways per listed suite, and the release
+  is blocked with `under_blocking`, `over_refusal` or `boundary_incomplete`.
+  Policies and runs without these fields keep their hashes. See
+  `docs/CERTIFICATION.md#two-way-boundary`.
 - **MCP tool gate.** `cloakpipe mcp-proxy --manifest ... --certification ...`
   only forwards a `tools/call` when the tool is declared in the release manifest
   and the release's certification verifies at the moment of the call (trusted

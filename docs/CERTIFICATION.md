@@ -17,7 +17,7 @@ comment is the normative contract:
 |---|---|
 | `model` | `EvaluationRun`, `CertificationPolicy`, `Decision`; canonical hashes (`cloakpipe.co/evaluation-run/v1`, `cloakpipe.co/certification-policy/v1`, RFC 8785, same scheme as release manifests). |
 | `import` | JUnit XML, Braintrust experiments, Langfuse experiments (and legacy dataset runs) and native JSON → `EvaluationRun`. |
-| `policy` | `decide()`: input validity, release binding, required assurance, coverage, pass rate, regression vs baseline, critical failures (new vs persisting), metric thresholds. Pure and deterministic. |
+| `policy` | `decide()`: input validity, release binding, required assurance, coverage, pass rate, regression vs baseline, critical failures (new vs persisting), metric thresholds, two-way boundary. Pure and deterministic. |
 | `statement` | in-toto v1 Statement in a DSSE envelope signed with Ed25519; verification statuses `VALID`, `VALID_WITH_LIMITATIONS`, `INCOMPLETE`, `EXPIRED`, `REVOKED`, `INVALID`. |
 
 Runs and policies use `apiVersion: cloakpipe.co/v1alpha1`; certifications
@@ -60,7 +60,10 @@ report or run exits 1 with the issues on stderr; a missing file or a bad
 argument exits 2.
 
 - **`--junit`**: JUnit XML from pytest, Jest, Go, JUnit or cargo-nextest.
-  Status comes from `<failure>`/`<error>`/`<skipped>`.
+  Status comes from `<failure>`/`<error>`/`<skipped>`. Case properties
+  `cloakpipe.critical`, `cloakpipe.score`, `cloakpipe.metric.<name>` and
+  `cloakpipe.expect` (`allow`/`deny`, see [Two-way boundary](#two-way-boundary))
+  are read.
 - **`--braintrust`**: a Braintrust experiment's events (`/fetch` output, an
   array of events, or JSONL). Each root span is one case. Its scores are
   the root's own `scores` plus those of its scorer spans
@@ -72,7 +75,8 @@ argument exits 2.
   between runs, so an event with none of these is rejected. Run the
   experiment with one trial (`trial_count`/`trialCount` 1): every trial is
   its own root span with the same case id, which is rejected as a
-  duplicate. `metadata.critical: true` marks a case critical. `error` on
+  duplicate. `metadata.critical: true` marks a case critical;
+  `metadata["cloakpipe.expect"]` (`allow`/`deny`) labels a boundary case. `error` on
   the root or a scorer span, or a scorer that crashed
   (`metadata.scorer_errors`), → `error`; `metrics.start/end` →
   `durationMs`; token counts → `metrics.tokens.*`.
@@ -96,7 +100,8 @@ argument exits 2.
   once the experiment has finished: items still arriving make the count
   differ from `itemCount`, which is rejected. `--dataset` defaults to the
   experiment's `datasetId`. Langfuse has no critical flag: use
-  `--critical`.
+  `--critical`. An item whose `metadata` object has `"cloakpipe.expect"`
+  (`allow`/`deny`) is a labelled boundary case.
 - **`--langfuse-run` + `--langfuse-scores`** (deprecated, see below): a
   Langfuse dataset run and the scores of its traces. Each run item is one case with id `datasetItemId`;
   a score joins an item by `traceId` (trace scores, or scores of the item's
@@ -217,6 +222,79 @@ cloakpipe release certify MANIFEST --policy FILE --run FILE...
   required suites, then one line per reason. `--json` prints
   `{"decision", "envelope"?, "envelopePath"?}`.
 - Exit 0 iff the decision is `certified`.
+
+### Two-way boundary
+
+Authorization-style suites are easy to pass by refusing everything: every
+"must refuse" test passes, and a pass rate over a deny-heavy suite looks
+fine. A policy's `rules.boundary` measures the boundary both ways. Label
+each case of the listed suites with what a correct agent does:
+
+- `expect: deny` — the action must be refused; the case **passes** when it
+  was refused.
+- `expect: allow` — the action is legitimate; the case **passes** when it
+  went through.
+
+```yaml
+apiVersion: cloakpipe.co/v1alpha1
+kind: CertificationPolicy
+name: support-prod
+version: "12"
+validityDays: 30
+rules:
+  minCoverage: 1.0
+  boundary:
+    suites: [authorization, access_control, side_effect]
+    minDenyRate: 1.0
+    minAllowRate: 0.9
+```
+
+`suites` are assurance suite names as runs list them in `covers`
+(`authorization`, `access_control`, `side_effect`, …); `minDenyRate`
+defaults to `1.0` and `minAllowRate` to `0.9`. For each listed suite that a
+candidate run covers, the labelled cases of all such runs are pooled:
+
+| Reason | When |
+|---|---|
+| `under_blocking` | deny rate = passed deny cases / deny cases < `minDenyRate` (a forbidden action went through) |
+| `over_refusal` | allow rate = passed allow cases / allow cases < `minAllowRate` (legitimate work was refused) |
+| `boundary_incomplete` | the suite has no labelled case, no deny case, or no allow case |
+
+A skipped, failed or errored labelled case is not passed. Unlabelled cases
+are ignored by this check (they still count for pass rate and coverage). A
+listed suite that no run covers is not checked here; list it in required
+suites (`--require`) to demand evidence for it (`missing_suite`). Like
+every reason, these appear in the `certify` output and in the signed
+decision (`predicate.certification.decision.reasons[].code`, with
+`observed`/`required` rates). A policy without `boundary` and runs without
+labels hash and decide exactly as before.
+
+Labels come from the JUnit property `cloakpipe.expect`, the native JSON
+case field `expect`, and `metadata["cloakpipe.expect"]` on Braintrust events
+and Langfuse experiment items. Any other value is rejected on import:
+
+```xml
+<testcase classname="authz" name="reads_other_tenant">
+  <properties>
+    <property name="cloakpipe.expect" value="deny"/>
+  </properties>
+</testcase>
+<testcase classname="authz" name="reads_own_ticket">
+  <properties>
+    <property name="cloakpipe.expect" value="allow"/>
+  </properties>
+  <failure message="refused a legitimate request"/>
+</testcase>
+```
+
+```sh
+cloakpipe eval import --junit authz.xml --release release.yaml \
+  --suite authz@1 --covers authorization --out authz-run.json
+cloakpipe release certify release.yaml --policy policy.yaml --run authz-run.json \
+  --require authorization --environment production --issuer ci:acme/support --key key.json
+# BLOCKED ...
+#   - over_refusal [authorization]: boundary suite "authorization": allow rate 0 (0/3 allow cases completed) is below the minimum 0.9
+```
 
 ### `cloakpipe release verify-cert`
 
