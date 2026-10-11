@@ -22,6 +22,7 @@ tracing.workspace = true
 uuid = { workspace = true, features = ["v5"] }
 sha2 = "0.10"
 rusqlite = { workspace = true }
+rand = { workspace = true }
 
 [dev-dependencies]
 rusqlite = { workspace = true }

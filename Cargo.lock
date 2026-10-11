@@ -634,6 +634,7 @@ dependencies = [
  "cloakpipe-verify",
  "ed25519-dalek",
  "hex",
+ "rand 0.8.6",
  "rmcp",
  "rusqlite",
  "serde",

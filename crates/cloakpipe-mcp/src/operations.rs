@@ -29,6 +29,7 @@
 //! the same database is refused instead of demoting the first one's live
 //! operations; `operations list` and `operations reconcile` take no lock.
 
+use rand::RngCore;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
@@ -220,9 +221,13 @@ impl OperationStore {
             CREATE TABLE IF NOT EXISTS operation_id_key (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 key BLOB NOT NULL CHECK (length(key) = 32)
-            );
-            INSERT OR IGNORE INTO operation_id_key (id, key) VALUES (1, randomblob(32));",
+            );",
         )?;
+        // A new database's key comes from the OS CSPRNG; a key already
+        // stored (including one an earlier version made) is kept.
+        let mut key = [0u8; 32];
+        rand::rngs::OsRng.fill_bytes(&mut key);
+        conn.execute("INSERT OR IGNORE INTO operation_id_key (id, key) VALUES (1, ?1)", params![&key[..]])?;
         Ok(Self { conn, path, gate_lock: None })
     }
 
@@ -271,9 +276,10 @@ impl OperationStore {
     }
 
     /// This database's secret key for derived operation ids
-    /// ([`cloakpipe_release::action::derive_operation_id`]): 32 random bytes
-    /// made when the database is created. It never leaves the database, so a
-    /// ledger holder cannot test argument guesses against a derived id.
+    /// ([`cloakpipe_release::action::derive_operation_id`]): 32 bytes from
+    /// the OS CSPRNG, made when the database is created. It never leaves the
+    /// database, so a ledger holder cannot test argument guesses against a
+    /// derived id.
     pub fn operation_id_key(&self) -> Result<[u8; 32], OperationsError> {
         let key: Vec<u8> = self.conn.query_row("SELECT key FROM operation_id_key WHERE id = 1", [], |r| r.get(0))?;
         key.try_into().map_err(|_| OperationsError("operation id key is not 32 bytes".into()))

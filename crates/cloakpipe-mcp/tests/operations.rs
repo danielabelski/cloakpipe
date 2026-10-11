@@ -291,3 +291,20 @@ fn reconciling_an_in_flight_operation_needs_force() {
     s.reconcile("op-1", OperationState::NotApplied, true, || Ok(())).unwrap();
     assert_eq!(s.get("op-1").unwrap().unwrap().state, OperationState::NotApplied);
 }
+
+/// A key an existing database already holds (whoever made it) is kept: the
+/// operation ids derived under it stay the same.
+#[test]
+fn an_existing_operation_id_key_is_kept() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = rusqlite::Connection::open(dir.path().join("ops.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE operation_id_key (id INTEGER PRIMARY KEY CHECK (id = 1), key BLOB NOT NULL CHECK (length(key) = 32));
+         INSERT INTO operation_id_key (id, key) VALUES (1, randomblob(32));",
+    )
+    .unwrap();
+    let stored: Vec<u8> = conn.query_row("SELECT key FROM operation_id_key", [], |r| r.get(0)).unwrap();
+    drop(conn);
+    assert_eq!(open(dir.path()).operation_id_key().unwrap().to_vec(), stored);
+    assert_eq!(open(dir.path()).operation_id_key().unwrap().to_vec(), stored);
+}

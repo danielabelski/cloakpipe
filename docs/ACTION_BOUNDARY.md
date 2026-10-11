@@ -292,7 +292,8 @@ operation_id_key(id INTEGER PRIMARY KEY, key BLOB)  -- one row
 
 `call_digest` is the call fingerprint and `result` the tool's result as it
 left the tool (masked, before rehydration). `operation_id_key` holds 32
-random bytes made when the database is created: the key for derived
+bytes from the operating system's CSPRNG, made when the database is created
+(a key already stored is kept): the key for derived
 operation ids. All three are local operator state and never go into the
 ledger. The proxy refuses to start (exit 2) when a supplied
 contract has a `sideEffect: true` tool and no operations database is given.
