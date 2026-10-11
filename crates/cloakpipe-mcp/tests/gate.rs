@@ -299,11 +299,64 @@ mod contracts {
     }
 
     #[test]
-    fn side_effect_tools_need_operation_tracking() {
+    fn side_effect_tools_need_an_operations_store() {
         let c = contract(true, false);
         let m = release_binding(&[&c]);
-        let err = certified_for(&m).with_contracts(vec![c], None).err().expect("refused");
-        assert!(matches!(&err, GateConfigError::SideEffectUnsupported { tool } if tool == "crm.patch"), "{err}");
+        let g = certified_for(&m).with_contracts(vec![c.clone()], Some(task())).unwrap();
+        assert!(!g.has_operations());
+        let err = g.ready().expect_err("not ready without an operations store");
+        assert!(matches!(&err, GateConfigError::OperationsRequired { tool } if tool == "crm.patch"), "{err}");
+        assert!(err.to_string().contains("--operations-db"), "{err}");
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = cloakpipe_mcp::operations::OperationStore::open(dir.path().join("ops.db")).unwrap();
+        let g = certified_for(&m).with_contracts(vec![c], Some(task())).unwrap().with_operations(store).unwrap();
+        assert!(g.has_operations());
+        assert!(g.ready().is_ok());
+        // A gate with no side-effect tool needs no store.
+        assert!(gate_with(Some(task())).ready().is_ok());
+    }
+
+    #[test]
+    fn a_side_effect_call_gets_an_operation_derived_from_the_task_and_the_call() {
+        use cloakpipe_release::action::{derive_operation_id, fingerprint};
+        let c = contract(true, false);
+        let m = release_binding(&[&c]);
+        let g = certified_for(&m).with_contracts(vec![c], Some(task())).unwrap();
+        let auth = g.authorize("crm.patch", Some(&args()), NOW).unwrap();
+        let op = auth.operation.expect("a side-effect call is an operation");
+        let fp = fingerprint(&m.manifest_hash(), "crm.patch", &args());
+        assert_eq!(op.fingerprint, fp);
+        assert_eq!(op.operation_id, derive_operation_id("t-981", &fp));
+        assert!(auth.approval.is_none());
+        // Same call, same operation; another call, another operation.
+        assert_eq!(g.authorize("crm.patch", Some(&args()), NOW).unwrap().operation.unwrap().operation_id, op.operation_id);
+        let other = with(|a| a["patch"]["stage"] = json!("review"));
+        assert_ne!(g.authorize("crm.patch", Some(&other), NOW).unwrap().operation.unwrap().operation_id, op.operation_id);
+        // Tools without sideEffect are not operations.
+        assert!(gate_with(Some(task())).authorize("crm.patch", Some(&args()), NOW).unwrap().operation.is_none());
+    }
+
+    #[test]
+    fn a_side_effect_call_without_a_task_id_is_refused() {
+        let c = contract(true, false);
+        let m = release_binding(&[&c]);
+        let mut t = task();
+        t.as_object_mut().unwrap().remove("taskId");
+        let g = certified_for(&m).with_contracts(vec![c], Some(t)).unwrap();
+        assert_eq!(g.check("crm.patch", Some(&args()), NOW), Err(Denial::TaskContextMissing { path: None }));
+    }
+
+    #[test]
+    fn operation_denials_have_stable_codes() {
+        let op = Some("op-1".to_string());
+        assert_eq!(Denial::OperationConflict { operation_id: "op-1".into() }.code(), "operation_conflict");
+        assert_eq!(Denial::ReconcileBeforeRetry { operation_id: "op-1".into() }.code(), "reconcile_before_retry");
+        assert_eq!(Denial::OperationConflict { operation_id: "op-1".into() }.operation_id(), op.as_deref());
+        assert_eq!(Denial::OperationsUnavailable.code(), "operations_unavailable");
+        assert_eq!(Denial::RequestIdMissing.code(), "request_id_missing");
+        assert_eq!(Denial::RequestIdInUse.code(), "request_id_in_use");
+        assert_eq!(Denial::ApprovalRequired.operation_id(), None);
     }
 
     #[test]
@@ -437,6 +490,28 @@ mod approvals {
             Some(ApprovedCall { receipt_digest: expected, operation_id: "op-7f3a".into(), fingerprint: fp(&args()) })
         );
         assert_eq!(g.check("crm.patch", Some(&args()), NOW), Ok(()));
+    }
+
+    #[test]
+    fn an_approved_side_effect_call_is_the_receipts_operation() {
+        // The full example contract: sideEffect and requiresApproval both on.
+        let full = ToolContract::parse_path(&example("crm-tools.contract.yaml")).unwrap();
+        let mut m = parse_path(&example("release.yaml")).unwrap();
+        m.spec.policies.retain(|p| !p.reference.starts_with("policy:tool-contract/"));
+        m.spec.policies.push(ArtifactRef { reference: full.policy_ref() });
+        let dir = tempfile::tempdir().unwrap();
+        let fp = fingerprint(&m.manifest_hash(), "crm.patch", &args());
+        let a = Approval { release: m.manifest_hash().to_string(), ..approval() };
+        file_receipt(dir.path(), &a, &approver(), &fp, &fp);
+        let cert = envelope(&cert_for(&m.manifest_hash().to_string(), "certified", "production"));
+        let g = ToolGate::new(GateMode::Enforce, &m, "production", Some(cert), trust())
+            .with_contracts(vec![full], Some(task()))
+            .unwrap()
+            .with_approvals(dir.path(), approvers());
+        let auth = g.authorize("crm.patch", Some(&args()), NOW).unwrap();
+        let op = auth.operation.expect("an operation");
+        assert_eq!(op.operation_id, "op-7f3a", "the receipt's operationId, not a derived one");
+        assert_eq!(op.fingerprint, fp);
     }
 
     #[test]

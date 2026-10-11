@@ -22,11 +22,13 @@ use cloakpipe_ledger::{
     record::Identity, store::LedgerStore, Action, ActionKind, Detection, Hop, MetadataValue, RecordBuilder,
 };
 use serde_json::Value;
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::{Arc, Mutex};
 
-use crate::gate::{GateMode, ToolGate};
+use crate::gate::{Denial, GateMode, OperationKey, ToolGate};
+use crate::operations::{Begin, OperationState, OperationStore, ReconcileError};
 
 /// Everything the interceptor needs beyond the upstream command.
 pub struct ProxyContext {
@@ -46,7 +48,32 @@ pub struct ProxyContext {
 /// JSON-RPC error code for a tool call the gate refused (server-defined range).
 pub const TOOL_REFUSED: i64 = -32001;
 
+/// JSON-RPC error code for a side-effecting call whose earlier attempt has
+/// no settled outcome (`reconcile_before_retry`, `operation_unknown`): an
+/// operator must reconcile the operation before it may run again.
+pub const RECONCILE_REQUIRED: i64 = -32002;
+
 type SharedLedger = Option<Arc<Mutex<LedgerStore>>>;
+type SharedOperations = Option<Arc<Mutex<OperationStore>>>;
+/// Side-effecting calls forwarded and not yet answered.
+#[derive(Default)]
+struct PendingOps {
+    /// JSON-RPC request id (serialized) -> operation id.
+    by_request: HashMap<String, String>,
+    /// Set by the exit sweep: no call may start after it.
+    closed: bool,
+}
+type Pending = Arc<Mutex<PendingOps>>;
+
+/// What the coordinator decided for a side-effecting call.
+enum Coordinated {
+    /// Forward it; the operation is in flight under this request id.
+    Forward,
+    /// Answer with this (stored, rehydrated) result instead of forwarding.
+    Replay(Value),
+    /// Refuse it.
+    Deny(Denial),
+}
 
 /// Run the interceptor: spawn `upstream` and pump JSON-RPC both ways. Returns
 /// when the upstream exits (which happens when the agent closes stdin, or when
@@ -63,6 +90,10 @@ where
     W: Write + Send + 'static,
 {
     anyhow::ensure!(!upstream.is_empty(), "upstream MCP command is empty");
+    if let Some(gate) = &ctx.gate {
+        // A side-effect tool without an operations store must not run.
+        gate.ready()?;
+    }
 
     let mut child = Command::new(&upstream[0])
         .args(&upstream[1..])
@@ -81,6 +112,13 @@ where
     let (tenant, agent) = stable_ids();
     let release = ctx.release;
     let gate = ctx.gate;
+    let operations: SharedOperations = gate.as_ref().and_then(ToolGate::operations);
+    let pending: Pending = Arc::new(Mutex::new(PendingOps::default()));
+    // Evidence for the start-up sweep: operations a previous process left in
+    // flight are now unknown.
+    for op in gate.as_ref().map(|g| g.recovered_operations().to_vec()).unwrap_or_default() {
+        record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Passthrough, &operation_meta(OperationState::Unknown, &op));
+    }
     // Both directions answer the agent: ingress relays upstream replies and
     // egress answers refused calls.
     let agent_out = Arc::new(Mutex::new(agent_out));
@@ -91,6 +129,8 @@ where
         let vault = vault.clone();
         let ledger = ledger.clone();
         let agent_out = agent_out.clone();
+        let operations = operations.clone();
+        let pending = pending.clone();
         std::thread::spawn(move || {
             let mut to_upstream = to_upstream; // owned: dropped (→ upstream stdin EOF) when this thread ends
             for line in BufReader::new(agent_in).lines() {
@@ -119,58 +159,96 @@ where
                     Ok(mut msg) => {
                         if msg.get("method").and_then(Value::as_str) == Some("tools/call") {
                             // Ledger metadata for the forwarded call: a warn-mode
-                            // violation, or the approval it was allowed on.
+                            // violation, the approval it was allowed on, the operation.
                             let mut evidence = Vec::new();
                             if let Some(gate) = &gate {
-                                let tool = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
+                                let tool = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("").to_string();
                                 let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                                 // The raw arguments, as the agent sent them: masking
                                 // happens only after the gate has passed the call.
                                 let arguments = msg.pointer("/params/arguments");
-                                match gate.authorize(tool, arguments, &now) {
+                                // A refusal, and whether it holds in warn mode too.
+                                let mut refusal: Option<(Denial, bool)> = None;
+                                let mut replay: Option<(Value, String)> = None;
+                                match gate.authorize(&tool, arguments, &now) {
                                     Ok(auth) => {
-                                        if let Some(approved) = auth.approval {
+                                        if let Some(approved) = &auth.approval {
                                             // The receipt's digest, never the call fingerprint
                                             // (a plain hash of the arguments).
                                             evidence.push(("approval", MetadataValue::Hash(approved.receipt_digest)));
                                             evidence.push(opaque("operation_id", &approved.operation_id));
                                         }
-                                    }
-                                    Err(denial) => {
-                                        let code = denial.code();
-                                        // A contract path comes from the contract, never
-                                        // from the call, so it is safe to record.
-                                        let path = denial.path().map(str::to_string);
-                                        if gate.mode == GateMode::Enforce {
-                                            let mut meta = vec![opaque("gate_denial", &code)];
-                                            meta.extend(path.as_deref().map(|p| opaque("gate_path", p)));
-                                            record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, &meta);
-                                            // A notification (no id member) takes no response;
-                                            // `"id": null` is a request and is answered.
-                                            if let Some(id) = msg.get("id") {
-                                                let mut data = serde_json::json!({ "reason": code, "tool": tool, "release": gate.release() });
-                                                if let Some(path) = &path {
-                                                    data["path"] = Value::String(path.clone());
-                                                }
-                                                let refusal = serde_json::json!({
-                                                    "jsonrpc": "2.0",
-                                                    "id": id,
-                                                    "error": {
-                                                        "code": TOOL_REFUSED,
-                                                        "message": format!("tool call refused by CloakPipe: {code}"),
-                                                        "data": data,
-                                                    },
-                                                });
-                                                if write_line(&agent_out, &refusal.to_string()).is_err() {
-                                                    break;
-                                                }
+                                        if let Some(op) = &auth.operation {
+                                            if auth.approval.is_none() {
+                                                evidence.push(opaque("operation_id", &op.operation_id));
                                             }
-                                            continue;
+                                            // Exactly-once bookkeeping is not a release rule:
+                                            // it holds in warn mode too.
+                                            match coordinate(&operations, &pending, &vault, msg.get("id"), &tool, op) {
+                                                Coordinated::Forward => {}
+                                                Coordinated::Replay(result) => replay = Some((result, op.operation_id.clone())),
+                                                Coordinated::Deny(d) => refusal = Some((d, true)),
+                                            }
                                         }
-                                        tracing::warn!(reason = %code, "MCP tool call fails the release gate (warn mode: forwarded)");
-                                        evidence.push(opaque("gate_violation", &code));
-                                        evidence.extend(path.as_deref().map(|p| opaque("gate_path", p)));
                                     }
+                                    Err(denial) => refusal = Some((denial, false)),
+                                }
+                                if let Some((result, operation_id)) = replay {
+                                    // Already done: answer with the stored result and
+                                    // never run the effect again.
+                                    let mut meta = operation_meta(OperationState::Done, &operation_id);
+                                    meta.push(("operation_replayed", MetadataValue::Bool(true)));
+                                    record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Passthrough, &meta);
+                                    if let Some(id) = msg.get("id") {
+                                        let reply = serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result });
+                                        if write_line(&agent_out, &reply.to_string()).is_err() {
+                                            break;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if let Some((denial, always)) = refusal {
+                                    let code = denial.code();
+                                    // A contract path comes from the contract, never
+                                    // from the call, so it is safe to record.
+                                    let path = denial.path().map(str::to_string);
+                                    if always || gate.mode == GateMode::Enforce {
+                                        let mut meta = vec![opaque("gate_denial", &code)];
+                                        meta.extend(denial.operation_id().map(|o| opaque("operation_id", o)));
+                                        meta.extend(path.as_deref().map(|p| opaque("gate_path", p)));
+                                        record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, &meta);
+                                        // A notification (no id member) takes no response;
+                                        // `"id": null` is a request and is answered.
+                                        if let Some(id) = msg.get("id") {
+                                            let mut data = serde_json::json!({ "reason": code, "tool": tool, "release": gate.release() });
+                                            if let Some(path) = &path {
+                                                data["path"] = Value::String(path.clone());
+                                            }
+                                            if let Some(op) = denial.operation_id() {
+                                                data["operationId"] = Value::String(op.to_string());
+                                            }
+                                            let rpc_code = match denial {
+                                                Denial::ReconcileBeforeRetry { .. } => RECONCILE_REQUIRED,
+                                                _ => TOOL_REFUSED,
+                                            };
+                                            let refusal = serde_json::json!({
+                                                "jsonrpc": "2.0",
+                                                "id": id,
+                                                "error": {
+                                                    "code": rpc_code,
+                                                    "message": format!("tool call refused by CloakPipe: {code}"),
+                                                    "data": data,
+                                                },
+                                            });
+                                            if write_line(&agent_out, &refusal.to_string()).is_err() {
+                                                break;
+                                            }
+                                        }
+                                        continue;
+                                    }
+                                    tracing::warn!(reason = %code, "MCP tool call fails the release gate (warn mode: forwarded)");
+                                    evidence.push(opaque("gate_violation", &code));
+                                    evidence.extend(path.as_deref().map(|p| opaque("gate_path", p)));
                                 }
                             }
                             let masked = {
@@ -199,17 +277,25 @@ where
     let ingress = {
         let vault = vault.clone();
         let ledger = ledger.clone();
+        let agent_out = agent_out.clone();
+        let operations = operations.clone();
+        let pending = pending.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(from_upstream);
             for line in reader.lines() {
                 let Ok(line) = line else { break };
                 let out = match serde_json::from_str::<Value>(&line) {
                     Ok(mut msg) => {
+                        // The reply to a side-effecting call settles its operation
+                        // before the agent sees it.
+                        let settled = settle_reply(&operations, &pending, &msg);
                         if msg.pointer("/result/content").is_some() {
-                            {
-                                let v = vault.lock().expect("vault poisoned");
-                                rehydrate_value(msg.pointer_mut("/result/content"), &v);
-                            }
+                            let v = vault.lock().expect("vault poisoned");
+                            rehydrate_value(msg.pointer_mut("/result/content"), &v);
+                        }
+                        if let Some((operation_id, state)) = settled {
+                            record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Pseudonymize, &operation_meta(state, &operation_id));
+                        } else if msg.pointer("/result/content").is_some() {
                             record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Pseudonymize, &[]);
                         }
                         serde_json::to_string(&msg).unwrap_or(line)
@@ -230,7 +316,170 @@ where
     // agent before we return. Egress may still be parked on stdin; the process
     // exiting cleans it up.
     let _ = ingress.join();
+
+    // Exit sweep: a side-effecting call still in flight never got its reply.
+    // The tool may or may not have acted, so its operation is unknown until
+    // an operator reconciles it; the agent is told so.
+    let abandoned: Vec<(String, String)> = match pending.lock() {
+        Ok(mut p) => {
+            p.closed = true;
+            p.by_request.drain().collect()
+        }
+        Err(_) => Vec::new(),
+    };
+    for (request, operation_id) in abandoned {
+        if let Some(store) = &operations {
+            if let Ok(mut s) = store.lock() {
+                if let Err(e) = s.settle(&operation_id, OperationState::Unknown, None) {
+                    tracing::warn!("operations store: could not mark {operation_id} unknown ({e}); a restart will");
+                }
+            }
+        }
+        record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Passthrough, &operation_meta(OperationState::Unknown, &operation_id));
+        let id: Value = serde_json::from_str(&request).unwrap_or(Value::Null);
+        let notice = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "error": {
+                "code": RECONCILE_REQUIRED,
+                "message": "the tool server went away before answering: the outcome of this call is unknown",
+                "data": { "reason": "operation_unknown", "operationId": operation_id },
+            },
+        });
+        let _ = write_line(&agent_out, &notice.to_string());
+    }
     Ok(())
+}
+
+/// Run a side-effecting call through the operations store, in one
+/// transaction: forward it (now `in_flight` under its request id), replay a
+/// `done` operation's stored result, or refuse it.
+fn coordinate(
+    operations: &SharedOperations,
+    pending: &Pending,
+    vault: &Mutex<Vault>,
+    id: Option<&Value>,
+    tool: &str,
+    op: &OperationKey,
+) -> Coordinated {
+    let Some(store) = operations else { return Coordinated::Deny(Denial::OperationsUnavailable) };
+    // Without a request id the reply could never settle the operation.
+    let Some(id) = id.filter(|id| !id.is_null()) else { return Coordinated::Deny(Denial::RequestIdMissing) };
+    let request = id.to_string();
+    // Lock order everywhere: pending, then the store.
+    let Ok(mut pending) = pending.lock() else { return Coordinated::Deny(Denial::OperationsUnavailable) };
+    if pending.closed {
+        return Coordinated::Deny(Denial::OperationsUnavailable);
+    }
+    if pending.by_request.contains_key(&request) {
+        return Coordinated::Deny(Denial::RequestIdInUse);
+    }
+    let Ok(mut store) = store.lock() else { return Coordinated::Deny(Denial::OperationsUnavailable) };
+    match store.begin(&op.operation_id, tool, &op.fingerprint.0) {
+        Ok(Begin::Forward) => {
+            pending.by_request.insert(request, op.operation_id.clone());
+            Coordinated::Forward
+        }
+        Ok(Begin::Replay { result }) => match replayed(result.as_deref(), &op.operation_id, vault) {
+            Some(result) => Coordinated::Replay(result),
+            None => Coordinated::Deny(Denial::OperationsUnavailable),
+        },
+        Ok(Begin::Conflict) => Coordinated::Deny(Denial::OperationConflict { operation_id: op.operation_id.clone() }),
+        Ok(Begin::ReconcileBeforeRetry(_)) => {
+            Coordinated::Deny(Denial::ReconcileBeforeRetry { operation_id: op.operation_id.clone() })
+        }
+        Err(e) => {
+            tracing::warn!("operations store: {e}; side-effecting call refused");
+            Coordinated::Deny(Denial::OperationsUnavailable)
+        }
+    }
+}
+
+/// The answer for a retry of a `done` operation: its stored (masked) result
+/// rehydrated as the ingress path does, marked `_meta.cloakpipe.replayed`.
+/// An operation an operator reconciled as done has no stored result: the
+/// agent is told it completed. `None`: the stored result is unreadable.
+fn replayed(stored: Option<&str>, operation_id: &str, vault: &Mutex<Vault>) -> Option<Value> {
+    let mut result = match stored {
+        Some(stored) => serde_json::from_str::<Value>(stored).ok().filter(Value::is_object)?,
+        None => serde_json::json!({
+            "content": [{
+                "type": "text",
+                "text": format!("This call already completed (operation {operation_id}, reconciled by an operator); it was not run again."),
+            }],
+        }),
+    };
+    if result.get("content").is_some() {
+        let v = vault.lock().ok()?;
+        rehydrate_value(result.get_mut("content"), &v);
+    }
+    let meta = result.as_object_mut()?.entry("_meta").or_insert_with(|| serde_json::json!({}));
+    let cloakpipe = meta.as_object_mut()?.entry("cloakpipe").or_insert_with(|| serde_json::json!({}));
+    let cloakpipe = cloakpipe.as_object_mut()?;
+    cloakpipe.insert("replayed".into(), Value::Bool(true));
+    cloakpipe.insert("operationId".into(), Value::String(operation_id.to_string()));
+    Some(result)
+}
+
+/// Settle the operation an upstream reply answers: a `result` without
+/// `isError: true` is `done` (its masked result stored for replay); an
+/// error result or a JSON-RPC `error` is `failed`. Returns the operation and
+/// its new state, or `None` when the reply answers no side-effecting call.
+fn settle_reply(operations: &SharedOperations, pending: &Pending, msg: &Value) -> Option<(String, OperationState)> {
+    let store = operations.as_ref()?;
+    let request = msg.get("id")?.to_string();
+    let mut pending = pending.lock().ok()?;
+    let operation_id = pending.by_request.remove(&request)?;
+    let result = msg.get("result").filter(|_| msg.get("error").is_none());
+    let done = result.is_some_and(|r| r.get("isError") != Some(&Value::Bool(true)));
+    let (state, stored) = if done {
+        (OperationState::Done, result.map(Value::to_string))
+    } else {
+        (OperationState::Failed, None)
+    };
+    match store.lock() {
+        Ok(mut s) => {
+            if let Err(e) = s.settle(&operation_id, state, stored.as_deref()) {
+                tracing::warn!("operations store: could not settle {operation_id} ({e}); a restart marks it unknown");
+            }
+        }
+        Err(_) => tracing::warn!("operations store: lock poisoned; {operation_id} not settled"),
+    }
+    Some((operation_id, state))
+}
+
+/// Ledger metadata naming an operation and its state.
+fn operation_meta(state: OperationState, operation_id: &str) -> Vec<(&'static str, MetadataValue)> {
+    vec![opaque("operation_id", operation_id), opaque("operation_state", state.as_str())]
+}
+
+/// An operator's verdict on an operation whose outcome is unknown
+/// (`cloakpipe operations reconcile`): `done` (a retry replays) or
+/// `not_applied` (a retry runs). With a ledger, an `operation_reconciled`
+/// hop (release-bound when `release` is given) is appended in the same
+/// transaction: if it cannot be recorded, nothing changes.
+pub fn reconcile_operation(
+    store: &mut OperationStore,
+    operation_id: &str,
+    outcome: OperationState,
+    ledger_db: Option<&str>,
+    release: Option<[u8; 32]>,
+) -> Result<(), ReconcileError> {
+    store.reconcile(operation_id, outcome, || {
+        let Some(path) = ledger_db else { return Ok(()) };
+        let mut ledger = LedgerStore::open(path).map_err(|e| e.to_string())?;
+        let (tenant, agent) = stable_ids();
+        append_hop(
+            &mut ledger,
+            tenant,
+            agent,
+            release,
+            Hop::OperationReconciled,
+            0,
+            ActionKind::Passthrough,
+            &operation_meta(outcome, operation_id),
+        )
+    })
 }
 
 /// JSON-RPC members whose spelling must be exact. Some JSON decoders (Go's
@@ -380,12 +629,27 @@ fn record_hop(
         tracing::warn!(hop = ?hop, "evidence ledger: lock poisoned; MCP hop not recorded");
         return;
     };
+    if let Err(e) = append_hop(&mut store, tenant, agent, release, hop, count, kind, gate) {
+        // Payload-free: the hop kind and error only, never message content.
+        tracing::warn!(hop = ?hop, "evidence ledger: failed to record MCP hop: {e}");
+    }
+}
+
+/// [`record_hop`] on an open store, reporting failure.
+#[allow(clippy::too_many_arguments)]
+fn append_hop(
+    store: &mut LedgerStore,
+    tenant: uuid::Uuid,
+    agent: uuid::Uuid,
+    release: Option<[u8; 32]>,
+    hop: Hop,
+    count: usize,
+    kind: ActionKind,
+    gate: &[(&str, MetadataValue)],
+) -> Result<(), String> {
     let next_seq = match store.head(&tenant) {
         Ok((head, _)) => head.map(|s| s + 1).unwrap_or(0),
-        Err(e) => {
-            tracing::warn!(hop = ?hop, "evidence ledger: cannot read chain head; MCP hop not recorded: {e}");
-            return;
-        }
+        Err(e) => return Err(format!("cannot read chain head: {e}")),
     };
     let build = |entries: &[(&str, MetadataValue)]| {
         let mut builder = RecordBuilder::new()
@@ -423,13 +687,8 @@ fn record_hop(
         }
         other => other,
     };
-    let appended = record
-        .map_err(|e| e.to_string())
-        .and_then(|mut record| store.append(&tenant, &mut record).map(|_| ()).map_err(|e| e.to_string()));
-    if let Err(e) = appended {
-        // Payload-free: the hop kind and error only, never message content.
-        tracing::warn!(hop = ?hop, "evidence ledger: failed to record MCP hop: {e}");
-    }
+    let mut record = record.map_err(|e| e.to_string())?;
+    store.append(&tenant, &mut record).map(|_| ()).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

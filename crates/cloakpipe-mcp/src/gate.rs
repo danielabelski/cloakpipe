@@ -31,16 +31,27 @@
 //! tool, the task context's `taskId` and the trusted approver keys.
 //! [`ToolGate::authorize`] returns the receipt's digest and operation id so
 //! the call can be recorded against it.
+//!
+//! A contract tool with `sideEffect: true` is an *operation*
+//! ([`crate::operations`]): [`ToolGate::authorize`] names it (the receipt's
+//! `operationId`, else [`derive_operation_id`] from the task context's
+//! `taskId` and the call fingerprint) and the interceptor runs it through
+//! the operations store given to [`ToolGate::with_operations`], so a call
+//! whose outcome is unknown is never silently re-executed. A gate with such
+//! a tool and no store is not [`ToolGate::ready`].
 
 use cloakpipe_cert::approval::{verify_approval, ApprovalCheck, ApprovalError};
 use cloakpipe_cert::statement::{verify, Envelope, Status, TrustedKey, VerifyContext};
-use cloakpipe_release::action::{fingerprint, ToolCallFingerprint};
+use cloakpipe_release::action::{derive_operation_id, fingerprint, ToolCallFingerprint};
 use cloakpipe_release::contract::{self, ToolContract, ViolationCode};
 use cloakpipe_release::{AgentRelease, Reference, ReleaseHash};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+
+use crate::operations::OperationStore;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateMode {
@@ -84,6 +95,19 @@ pub enum Denial {
     ApprovalExpired,
     /// The release binds a tool contract the gate was not given.
     ContractMissing,
+    /// The operation id names a different call (operations store).
+    OperationConflict { operation_id: String },
+    /// The operation is in flight or its outcome is unknown: an operator
+    /// must reconcile it (`cloakpipe operations reconcile`) before a retry.
+    ReconcileBeforeRetry { operation_id: String },
+    /// The operations store could not be read or written.
+    OperationsUnavailable,
+    /// A side-effecting call sent as a notification (no JSON-RPC id): its
+    /// outcome could never be settled.
+    RequestIdMissing,
+    /// A side-effecting call reusing the JSON-RPC id of a call still in
+    /// flight: the replies could not be told apart.
+    RequestIdInUse,
 }
 
 impl Denial {
@@ -102,6 +126,19 @@ impl Denial {
             Denial::ApprovalInvalid => "approval_invalid".into(),
             Denial::ApprovalExpired => "approval_expired".into(),
             Denial::ContractMissing => "contract_missing".into(),
+            Denial::OperationConflict { .. } => "operation_conflict".into(),
+            Denial::ReconcileBeforeRetry { .. } => "reconcile_before_retry".into(),
+            Denial::OperationsUnavailable => "operations_unavailable".into(),
+            Denial::RequestIdMissing => "request_id_missing".into(),
+            Denial::RequestIdInUse => "request_id_in_use".into(),
+        }
+    }
+
+    /// The operation an operations-store denial is about.
+    pub fn operation_id(&self) -> Option<&str> {
+        match self {
+            Denial::OperationConflict { operation_id } | Denial::ReconcileBeforeRetry { operation_id } => Some(operation_id),
+            _ => None,
         }
     }
 
@@ -144,11 +181,22 @@ pub struct ApprovedCall {
     pub fingerprint: ToolCallFingerprint,
 }
 
+/// The operation a side-effecting call is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationKey {
+    /// The approval receipt's `operationId`, else the derived id.
+    pub operation_id: String,
+    /// The call's fingerprint: the store's `call_digest` (never ledger content).
+    pub fingerprint: ToolCallFingerprint,
+}
+
 /// What the gate establishes about an allowed call.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Authorization {
     /// Set when the call needed, and has, a valid approval receipt.
     pub approval: Option<ApprovedCall>,
+    /// Set when the contract marks the tool `sideEffect: true`.
+    pub operation: Option<OperationKey>,
 }
 
 /// Where approval receipts come from and who may sign them.
@@ -166,9 +214,10 @@ pub enum GateConfigError {
     NotSupplied { policy_ref: String },
     /// Two supplied contracts cover the same tool.
     AmbiguousTool { tool: String },
-    /// A contract tool with `sideEffect: true`: its operation outcomes must
-    /// be tracked, which this gate cannot do.
-    SideEffectUnsupported { tool: String },
+    /// A contract tool with `sideEffect: true` and no operations store.
+    OperationsRequired { tool: String },
+    /// The operations store could not be prepared.
+    OperationsStore(String),
     /// The task context is not a JSON object.
     TaskContextNotObject,
 }
@@ -184,10 +233,11 @@ impl std::fmt::Display for GateConfigError {
                 write!(f, "the release binds tool contract {policy_ref}, which was not supplied (--tool-contract)")
             }
             GateConfigError::AmbiguousTool { tool } => write!(f, "more than one tool contract covers tool {tool:?}"),
-            GateConfigError::SideEffectUnsupported { tool } => write!(
+            GateConfigError::OperationsRequired { tool } => write!(
                 f,
-                "tool {tool:?} has sideEffect: true, which needs operation tracking this gate does not provide"
+                "tool {tool:?} has sideEffect: true: its operations must be tracked in an operations store (--operations-db or CLOAKPIPE_OPERATIONS_DB)"
             ),
+            GateConfigError::OperationsStore(e) => write!(f, "operations store: {e}"),
             GateConfigError::TaskContextNotObject => write!(f, "the task context must be a JSON object"),
         }
     }
@@ -212,6 +262,10 @@ pub struct ToolGate {
     task: Option<Value>,
     /// Approval receipts; `None`: every approval-gated call is refused.
     approvals: Option<Approvals>,
+    /// The operations store for `sideEffect` tools.
+    operations: Option<Arc<Mutex<OperationStore>>>,
+    /// Operations the start-up sweep found left in flight (now `unknown`).
+    recovered: Vec<String>,
 }
 
 impl ToolGate {
@@ -250,6 +304,8 @@ impl ToolGate {
             contracts: BTreeMap::new(),
             task: None,
             approvals: None,
+            operations: None,
+            recovered: Vec::new(),
         }
     }
 
@@ -268,10 +324,7 @@ impl ToolGate {
             if !self.contract_refs.contains(&policy_ref) {
                 return Err(GateConfigError::NotInRelease { policy_ref });
             }
-            for (tool, rule) in &c.spec.tools {
-                if rule.side_effect {
-                    return Err(GateConfigError::SideEffectUnsupported { tool: tool.clone() });
-                }
+            for tool in c.spec.tools.keys() {
                 if by_tool.insert(tool.clone(), c.clone()).is_some() {
                     return Err(GateConfigError::AmbiguousTool { tool: tool.clone() });
                 }
@@ -293,6 +346,42 @@ impl ToolGate {
     pub fn with_approvals(mut self, dir: impl Into<PathBuf>, approvers: Vec<TrustedKey>) -> Self {
         self.approvals = Some(Approvals { dir: dir.into(), approvers });
         self
+    }
+
+    /// Track `sideEffect` operations in `store`. Every operation a previous
+    /// process left `in_flight` becomes `unknown` now (see
+    /// [`Self::recovered_operations`]): one gate per operations database.
+    pub fn with_operations(mut self, mut store: OperationStore) -> Result<Self, GateConfigError> {
+        self.recovered = store.recover().map_err(|e| GateConfigError::OperationsStore(e.to_string()))?;
+        self.operations = Some(Arc::new(Mutex::new(store)));
+        Ok(self)
+    }
+
+    /// Whether an operations store is configured.
+    pub fn has_operations(&self) -> bool {
+        self.operations.is_some()
+    }
+
+    /// The operations store, shared with the interceptor's reply thread.
+    pub fn operations(&self) -> Option<Arc<Mutex<OperationStore>>> {
+        self.operations.clone()
+    }
+
+    /// Operations the start-up sweep marked `unknown`.
+    pub fn recovered_operations(&self) -> &[String] {
+        &self.recovered
+    }
+
+    /// Can the gate run? A contract tool with `sideEffect: true` needs an
+    /// operations store.
+    pub fn ready(&self) -> Result<(), GateConfigError> {
+        if self.operations.is_none() {
+            let side_effect = self.contracts.iter().find(|(tool, c)| c.rule(tool).is_some_and(|r| r.side_effect));
+            if let Some((tool, _)) = side_effect {
+                return Err(GateConfigError::OperationsRequired { tool: tool.clone() });
+            }
+        }
+        Ok(())
     }
 
     /// The release's manifest hash (`sha256:<hex>`).
@@ -346,11 +435,24 @@ impl ToolGate {
         }
         let Some(rule) = self.contracts.get(tool).and_then(|c| c.rule(tool)) else { return Ok(Authorization::default()) };
         rule.check(arguments, self.task.as_ref())?;
-        if !rule.requires_approval {
-            return Ok(Authorization::default());
-        }
-        let approval = self.approve(tool, arguments.unwrap_or(&Value::Null), now)?;
-        Ok(Authorization { approval: Some(approval) })
+        let arguments = arguments.unwrap_or(&Value::Null);
+        let approval = if rule.requires_approval { Some(self.approve(tool, arguments, now)?) } else { None };
+        let operation = if !rule.side_effect {
+            None
+        } else if let Some(a) = &approval {
+            Some(OperationKey { operation_id: a.operation_id.clone(), fingerprint: a.fingerprint })
+        } else {
+            let release: ReleaseHash = self.release.parse().map_err(|_| Denial::OperationsUnavailable)?;
+            let fp = fingerprint(&release, tool, arguments);
+            let task_id = self.task_id().ok_or(Denial::TaskContextMissing { path: None })?;
+            Some(OperationKey { operation_id: derive_operation_id(task_id, &fp), fingerprint: fp })
+        };
+        Ok(Authorization { approval, operation })
+    }
+
+    /// The trusted task context's `taskId`.
+    fn task_id(&self) -> Option<&str> {
+        self.task.as_ref().and_then(|t| t.get("taskId")).and_then(Value::as_str)
     }
 
     /// Find and verify the approval receipt for this exact call.
@@ -368,7 +470,7 @@ impl ToolGate {
                 return Err(Denial::ApprovalInvalid);
             }
         };
-        let Some(task_id) = self.task.as_ref().and_then(|t| t.get("taskId")).and_then(Value::as_str) else {
+        let Some(task_id) = self.task_id() else {
             return Err(Denial::TaskContextMissing { path: None });
         };
         let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|_| Denial::ApprovalInvalid)?;

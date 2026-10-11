@@ -166,11 +166,14 @@ fn now() -> String {
 
 const COLUMNS: &str = "operation_id, tool, call_digest, state, result, updated_at";
 
-fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, Vec<u8>, String, Option<String>, String)> {
+/// A raw table row: operation_id, tool, call_digest, state, result, updated_at.
+type RawRow = (String, String, Vec<u8>, String, Option<String>, String);
+
+fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawRow> {
     Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
 }
 
-fn to_row(raw: (String, String, Vec<u8>, String, Option<String>, String)) -> Result<OperationRow, OperationsError> {
+fn to_row(raw: RawRow) -> Result<OperationRow, OperationsError> {
     let (operation_id, tool, digest, state, result, updated_at) = raw;
     let call_digest: [u8; 32] = digest
         .try_into()
