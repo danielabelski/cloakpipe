@@ -53,7 +53,10 @@ may contain breaking changes; these are marked **Breaking**.
   whose reply was lost (upstream exit, broken pipe, crash) becomes `unknown`
   and retries are refused with `reconcile_before_retry` (JSON-RPC `-32002`)
   until an operator runs the new `cloakpipe operations reconcile <id>
-  --outcome done|not-applied` (`cloakpipe operations list` shows them).
+  --outcome done|not-applied` (`cloakpipe operations list` shows them;
+  an `in_flight` operation needs `--force`). One proxy per operations
+  database: a running proxy holds `<db>.lock`, and a second one refuses to
+  start. A new operations database is created `0600` on unix.
   New denial reasons `operation_conflict`, `reconcile_before_retry`,
   `request_id_missing`, `request_id_in_use` and `operations_unavailable`.
   Ledger hops carry `operation_id` and `operation_state`, and a new hop
