@@ -554,6 +554,59 @@ fn the_exit_sweep_leaves_an_operation_reconciled_meanwhile_alone() {
     assert_eq!(states, [(Hop::OperationReconciled, "done".to_string())], "{records:?}");
 }
 
+/// While a side-effecting call waits for the operations database (an
+/// operator's `operations reconcile` holds its write lock), replies to other
+/// requests still reach the agent.
+#[test]
+fn replies_are_not_held_up_while_a_call_waits_for_the_operations_database() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dir = tempfile::tempdir().unwrap();
+    let g = gate(dir.path(), task());
+    let (held, released) = (Arc::new(AtomicBool::new(false)), Arc::new(AtomicBool::new(false)));
+    let locker = {
+        let (db, held, released) = (dir.path().join("ops.db"), held.clone(), released.clone());
+        std::thread::spawn(move || {
+            let conn = rusqlite::Connection::open(db).unwrap();
+            conn.execute_batch("BEGIN IMMEDIATE").unwrap();
+            held.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_secs(6));
+            released.store(true, Ordering::SeqCst);
+            conn.execute_batch("COMMIT").unwrap();
+        })
+    };
+    while !held.load(Ordering::SeqCst) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let (mut agent, proxy_side) = UnixStream::pair().unwrap();
+    let out = Capture::default();
+    let context = ctx(g, &dir.path().join("ledger.db"));
+    let (writer, reader, upstream) = (out.clone(), proxy_side.try_clone().unwrap(), slow_tool(dir.path(), false));
+    let handle = std::thread::spawn(move || run_proxy_io(upstream, context, reader, writer).unwrap());
+    let slow = json!({"jsonrpc": "2.0", "id": 5, "method": "slow/method"}).to_string();
+    agent.write_all(format!("{slow}\n{}\n", call(1, &args())).as_bytes()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut slow_answered_while_locked = None;
+    loop {
+        let msgs = out.messages();
+        if slow_answered_while_locked.is_none() && msgs.iter().any(|m| m["id"] == 5) {
+            slow_answered_while_locked = Some(!released.load(Ordering::SeqCst));
+        }
+        if msgs.iter().any(|m| m["id"] == 1) {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{msgs:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    agent.shutdown(std::net::Shutdown::Write).unwrap();
+    drop(proxy_side);
+    handle.join().unwrap();
+    locker.join().unwrap();
+    let msgs = out.messages();
+    assert_eq!(slow_answered_while_locked, Some(true), "the unrelated reply waited for the database: {msgs:?}");
+    assert!(answer(&msgs, 1).get("result").is_some(), "{msgs:?}");
+    assert_eq!(effects(dir.path()), 1);
+}
+
 /// A side-effecting call may not reuse the id of another request still
 /// waiting for its reply either.
 #[test]

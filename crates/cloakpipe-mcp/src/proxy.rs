@@ -432,19 +432,46 @@ fn coordinate(
     // Without a request id the reply could never settle the operation.
     let Some(id) = id.filter(|id| !id.is_null()) else { return Coordinated::Deny(Denial::RequestIdMissing) };
     let request = id.to_string();
-    // Lock order everywhere: pending, then the store.
-    let Ok(mut pending) = pending.lock() else { return Coordinated::Deny(Denial::OperationsUnavailable) };
-    if pending.closed {
-        return Coordinated::Deny(Denial::OperationsUnavailable);
+    // `pending` is never held across the store: `begin` may wait (up to the
+    // busy timeout) for an operator's `operations reconcile`, and the reply
+    // thread needs `pending` for every upstream reply. Checking the request
+    // id, then deciding, then registering it is still race-free: only this
+    // (egress) thread adds request ids, and nothing is forwarded until this
+    // returns, so no reply to this request can arrive in between. Only the
+    // exit sweep can close `pending` meanwhile; that is checked again below.
+    {
+        let Ok(pending) = pending.lock() else { return Coordinated::Deny(Denial::OperationsUnavailable) };
+        if pending.closed {
+            return Coordinated::Deny(Denial::OperationsUnavailable);
+        }
+        if pending.by_request.contains_key(&request) || pending.outstanding.contains_key(&request) {
+            return Coordinated::Deny(Denial::RequestIdInUse);
+        }
     }
-    if pending.by_request.contains_key(&request) || pending.outstanding.contains_key(&request) {
-        return Coordinated::Deny(Denial::RequestIdInUse);
-    }
-    let Ok(mut store) = store.lock() else { return Coordinated::Deny(Denial::OperationsUnavailable) };
-    match store.begin(&op.operation_id, tool, &op.fingerprint.0) {
+    let decision = match store.lock() {
+        Ok(mut s) => s.begin(&op.operation_id, tool, &op.fingerprint.0),
+        Err(_) => return Coordinated::Deny(Denial::OperationsUnavailable),
+    };
+    match decision {
         Ok(Begin::Forward) => {
-            pending.by_request.insert(request, op.operation_id.clone());
-            Coordinated::Forward
+            let registered = match pending.lock() {
+                Ok(mut p) if !p.closed => {
+                    p.by_request.insert(request, op.operation_id.clone());
+                    true
+                }
+                _ => false,
+            };
+            if registered {
+                return Coordinated::Forward;
+            }
+            // The proxy is shutting down: the call is never forwarded, so it
+            // certainly did not run and may be retried.
+            if let Ok(mut s) = store.lock() {
+                if let Err(e) = s.settle(&op.operation_id, OperationState::Failed, None) {
+                    tracing::warn!("operations store: could not release unsent {} ({e}); a restart marks it unknown", op.operation_id);
+                }
+            }
+            Coordinated::Deny(Denial::OperationsUnavailable)
         }
         Ok(Begin::Replay { result }) => match replayed(result.as_deref(), &op.operation_id, vault) {
             Some(result) => Coordinated::Replay(result),
@@ -501,16 +528,21 @@ fn settle_reply(operations: &SharedOperations, pending: &Pending, msg: &Value) -
         return None;
     }
     let request = msg.get("id")?.to_string();
-    let mut pending = pending.lock().ok()?;
-    let Some(operation_id) = pending.by_request.remove(&request) else {
-        // The reply to another request: it is no longer outstanding.
-        if let Some(n) = pending.outstanding.get_mut(&request) {
-            *n -= 1;
-            if *n == 0 {
-                pending.outstanding.remove(&request);
+    // `pending` is released before the store write, which may wait on the
+    // database.
+    let operation_id = {
+        let mut pending = pending.lock().ok()?;
+        let Some(operation_id) = pending.by_request.remove(&request) else {
+            // The reply to another request: it is no longer outstanding.
+            if let Some(n) = pending.outstanding.get_mut(&request) {
+                *n -= 1;
+                if *n == 0 {
+                    pending.outstanding.remove(&request);
+                }
             }
-        }
-        return None;
+            return None;
+        };
+        operation_id
     };
     let result = msg.get("result").filter(|_| msg.get("error").is_none());
     let done = result.is_some_and(|r| r.get("isError") != Some(&Value::Bool(true)));
