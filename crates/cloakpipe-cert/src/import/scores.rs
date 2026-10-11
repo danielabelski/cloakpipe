@@ -1,8 +1,8 @@
 //! Shared machinery of the score-based importers: a JSON value that keeps
 //! duplicate object keys, and turning per-case scores into a [`CaseResult`].
 
-use super::ImportError;
-use crate::model::{CaseResult, CaseStatus};
+use super::{ImportError, PROP_EXPECT};
+use crate::model::{CaseResult, CaseStatus, Expect};
 use serde::de::{self, Deserialize, Deserializer, MapAccess, SeqAccess, Visitor};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -100,6 +100,27 @@ impl J {
             J::Obj(v) => v.is_empty(),
             J::Bool(_) | J::Num(_) => false,
         }
+    }
+}
+
+/// The boundary label `metadata["cloakpipe.expect"]` of a case: absent (or
+/// metadata that is not an object) → `None`; `"allow"`/`"deny"` → the label.
+/// Anything else, including `null` or the key given twice, is an error:
+/// a label that cannot be read must not silently drop the case from the
+/// boundary.
+pub(super) fn metadata_expect(metadata: Option<&J>) -> Result<Option<Expect>, String> {
+    let Some(J::Obj(entries)) = metadata else {
+        return Ok(None);
+    };
+    let mut found = entries.iter().filter(|(k, _)| k == PROP_EXPECT).map(|(_, v)| v);
+    let value = match (found.next(), found.next()) {
+        (None, _) => return Ok(None),
+        (Some(_), Some(_)) => return Err(format!("metadata.{PROP_EXPECT}: given more than once")),
+        (Some(v), None) => v,
+    };
+    match value {
+        J::Str(s) => s.parse().map(Some).map_err(|e| format!("metadata.{PROP_EXPECT}: {e}")),
+        other => Err(format!("metadata.{PROP_EXPECT}: expected \"allow\" or \"deny\", found {}", other.kind())),
     }
 }
 
@@ -240,6 +261,6 @@ impl CaseScores {
         for (name, v) in self.values {
             metrics.insert(format!("score.{name}"), v);
         }
-        CaseResult { id, critical, status, score, metrics, duration_ms }
+        CaseResult { id, critical, status, score, metrics, duration_ms, expect: None }
     }
 }

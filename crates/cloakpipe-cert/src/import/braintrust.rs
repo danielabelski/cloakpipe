@@ -1,7 +1,7 @@
 //! Braintrust experiment export → [`EvaluationRun`] (contract in the
 //! `import` module docs).
 
-use super::scores::{json_error, CaseScores, ScoreRules, J};
+use super::scores::{json_error, metadata_expect, CaseScores, ScoreRules, J};
 use super::{build_run, secs_to_ms, ImportError, ImportMeta};
 use crate::model::{CaseResult, EvaluationRun, SourceKind};
 use std::collections::BTreeMap;
@@ -217,6 +217,12 @@ fn read_event(
     };
     let critical = critical_flag || meta.is_critical(&id);
 
+    // ── Boundary label ──
+    let expect = metadata_expect(metadata).unwrap_or_else(|e| {
+        issues.push(scores.issue(format_args!("{e}")));
+        None
+    });
+
     // ── Error ──
     // A scorer that raised logs no score: the SDK records it only in
     // `metadata.scorer_errors`. Missing evidence fails the case closed.
@@ -333,7 +339,7 @@ fn read_event(
     if !issues.is_empty() {
         return Err(issues);
     }
-    Ok(scores.into_case(id, critical, error, rules, metrics, duration_ms))
+    Ok(CaseResult { expect, ..scores.into_case(id, critical, error, rules, metrics, duration_ms) })
 }
 
 fn describe(v: &J) -> String {

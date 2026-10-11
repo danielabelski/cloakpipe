@@ -16,8 +16,10 @@
 //!   unparseable → `None`.
 //! - Case-level `<properties><property name=… value=…/></properties>`:
 //!   `cloakpipe.critical` = `true`/`false`; `cloakpipe.score` = f64;
-//!   `cloakpipe.metric.<name>` = f64 → `metrics[<name>]`. Non-finite or
-//!   unparseable numeric values are an error. Unknown properties are ignored.
+//!   `cloakpipe.metric.<name>` = f64 → `metrics[<name>]`;
+//!   `cloakpipe.expect` = `allow`/`deny` → `expect` (boundary label). Non-finite or
+//!   unparseable numeric values, any other `expect` value, and a property
+//!   given twice are an error. Unknown properties are ignored.
 //! - A case is also critical if its id matches any pattern in
 //!   `ImportMeta::critical`: a pattern ending in `*` is a prefix match,
 //!   otherwise an exact match.
@@ -296,6 +298,9 @@ pub fn from_json(json: &str) -> Result<EvaluationRun, ImportError> {
 const PROP_CRITICAL: &str = "cloakpipe.critical";
 const PROP_SCORE: &str = "cloakpipe.score";
 const PROP_METRIC_PREFIX: &str = "cloakpipe.metric.";
+/// Boundary label: the JUnit property, and the metadata key score-based
+/// sources read.
+pub(crate) const PROP_EXPECT: &str = "cloakpipe.expect";
 
 /// Where an open element sits, which decides how its children are read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -320,6 +325,7 @@ struct PendingCase {
     skipped: bool,
     critical_set: bool,
     score_set: bool,
+    expect_set: bool,
 }
 
 impl PendingCase {
@@ -505,12 +511,14 @@ impl JunitParser {
                 score: None,
                 metrics: BTreeMap::new(),
                 duration_ms,
+                expect: None,
             },
             failure: false,
             error: false,
             skipped: false,
             critical_set: false,
             score_set: false,
+            expect_set: false,
         });
     }
 
@@ -526,7 +534,8 @@ impl JunitParser {
 
 /// Apply one case-level property; unknown keys are ignored.
 fn apply_property(case: &mut PendingCase, key: &str, value: Option<&str>) -> Result<(), String> {
-    let is_known = key == PROP_CRITICAL || key == PROP_SCORE || key.starts_with(PROP_METRIC_PREFIX);
+    let is_known =
+        key == PROP_CRITICAL || key == PROP_SCORE || key == PROP_EXPECT || key.starts_with(PROP_METRIC_PREFIX);
     if !is_known {
         return Ok(());
     }
@@ -545,6 +554,11 @@ fn apply_property(case: &mut PendingCase, key: &str, value: Option<&str>) -> Res
             return Err("given more than once".into());
         }
         case.result.score = Some(finite(value)?);
+    } else if key == PROP_EXPECT {
+        if std::mem::replace(&mut case.expect_set, true) {
+            return Err("given more than once".into());
+        }
+        case.result.expect = Some(value.parse()?);
     } else if let Some(metric) = key.strip_prefix(PROP_METRIC_PREFIX) {
         if metric.is_empty() {
             return Err("metric name is empty".into());

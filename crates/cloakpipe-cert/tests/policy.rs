@@ -27,6 +27,7 @@ fn case(id: &str, status: CaseStatus) -> CaseResult {
         score: None,
         metrics: BTreeMap::new(),
         duration_ms: None,
+        expect: None,
     }
 }
 
@@ -1479,6 +1480,7 @@ fn arb_policy() -> impl Strategy<Value = CertificationPolicy> {
                         suite: suite.map(str::to_string),
                     })
                     .collect(),
+                boundary: None,
             })
         })
 }
