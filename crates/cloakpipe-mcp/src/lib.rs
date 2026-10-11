@@ -9,7 +9,7 @@
 
 pub mod gate;
 pub mod proxy;
-pub use gate::{Denial, GateMode, ToolGate};
+pub use gate::{Denial, GateConfigError, GateMode, ToolGate};
 pub use proxy::{run_proxy, run_proxy_io, stable_ids, ProxyContext};
 
 use cloakpipe_core::{

@@ -99,7 +99,7 @@ where
                 // forwarded — as re-serialized here, never the raw line.
                 if let Some(gate) = &gate {
                     if let Err((reason, code)) = screen(&line) {
-                        record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, Some(("gate_denial", reason.to_string())));
+                        record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, &[("gate_denial", reason.to_string())]);
                         let refusal = serde_json::json!({
                             "jsonrpc": "2.0",
                             "id": Value::Null,
@@ -118,24 +118,36 @@ where
                 let out = match serde_json::from_str::<Value>(&line) {
                     Ok(mut msg) => {
                         if msg.get("method").and_then(Value::as_str) == Some("tools/call") {
-                            let mut violation = None;
+                            let mut violation = Vec::new();
                             if let Some(gate) = &gate {
                                 let tool = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
                                 let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                                if let Err(denial) = gate.check(tool, &now) {
+                                // The raw arguments, as the agent sent them: masking
+                                // happens only after the gate has passed the call.
+                                let arguments = msg.pointer("/params/arguments");
+                                if let Err(denial) = gate.check(tool, arguments, &now) {
                                     let code = denial.code();
+                                    // A contract path comes from the contract, never
+                                    // from the call, so it is safe to record.
+                                    let path = denial.path().map(str::to_string);
                                     if gate.mode == GateMode::Enforce {
-                                        record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, Some(("gate_denial", code.clone())));
+                                        let mut meta = vec![("gate_denial", code.clone())];
+                                        meta.extend(path.clone().map(|p| ("gate_path", p)));
+                                        record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, &meta);
                                         // A notification (no id member) takes no response;
                                         // `"id": null` is a request and is answered.
                                         if let Some(id) = msg.get("id") {
+                                            let mut data = serde_json::json!({ "reason": code, "tool": tool, "release": gate.release() });
+                                            if let Some(path) = &path {
+                                                data["path"] = Value::String(path.clone());
+                                            }
                                             let refusal = serde_json::json!({
                                                 "jsonrpc": "2.0",
                                                 "id": id,
                                                 "error": {
                                                     "code": TOOL_REFUSED,
                                                     "message": format!("tool call refused by CloakPipe: {code}"),
-                                                    "data": { "reason": code, "tool": tool, "release": gate.release() },
+                                                    "data": data,
                                                 },
                                             });
                                             if write_line(&agent_out, &refusal.to_string()).is_err() {
@@ -145,15 +157,16 @@ where
                                         continue;
                                     }
                                     tracing::warn!(reason = %code, "MCP tool call fails the release gate (warn mode: forwarded)");
-                                    violation = Some(("gate_violation", code));
+                                    violation.push(("gate_violation", code));
+                                    violation.extend(path.map(|p| ("gate_path", p)));
                                 }
                             }
                             let masked = {
                                 let mut v = vault.lock().expect("vault poisoned");
                                 mask_value(msg.pointer_mut("/params/arguments"), &detector, &mut v)
                             };
-                            if masked > 0 || violation.is_some() {
-                                record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, masked, ActionKind::Pseudonymize, violation);
+                            if masked > 0 || !violation.is_empty() {
+                                record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, masked, ActionKind::Pseudonymize, &violation);
                             }
                         }
                         serde_json::to_string(&msg).unwrap_or(line)
@@ -185,7 +198,7 @@ where
                                 let v = vault.lock().expect("vault poisoned");
                                 rehydrate_value(msg.pointer_mut("/result/content"), &v);
                             }
-                            record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Pseudonymize, None);
+                            record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Pseudonymize, &[]);
                         }
                         serde_json::to_string(&msg).unwrap_or(line)
                     }
@@ -329,7 +342,10 @@ pub fn stable_ids() -> (uuid::Uuid, uuid::Uuid) {
 }
 
 /// Append a no-PII hop record (categories/count only, never text). Best-effort.
-/// `gate` adds one metadata entry with a gate reason code.
+/// `gate` adds metadata entries: a gate reason code first, then optional
+/// detail (`gate_path`). Should the ledger's PII check refuse the detail (a
+/// contract property named `phone`, say), the hop is recorded with the
+/// reason code alone rather than lost.
 #[allow(clippy::too_many_arguments)]
 fn record_hop(
     ledger: &SharedLedger,
@@ -339,7 +355,7 @@ fn record_hop(
     hop: Hop,
     count: usize,
     kind: ActionKind,
-    gate: Option<(&str, String)>,
+    gate: &[(&str, String)],
 ) {
     let Some(ledger) = ledger else { return };
     let Ok(mut store) = ledger.lock() else {
@@ -353,34 +369,43 @@ fn record_hop(
             return;
         }
     };
-    let mut builder = RecordBuilder::new()
-        .seq(next_seq)
-        .tenant(tenant)
-        .hop(hop)
-        .detection(Detection {
-            entity_type: "mcp".to_string(),
-            count: count as u32,
-            detector: cloakpipe_ledger::Detector::Regex,
-        })
-        .action(Action {
-            entity_type: "mcp".to_string(),
-            kind,
-            token_ref: Some(uuid::Uuid::new_v4().to_string()),
-        })
-        .identities(Identity {
-            agent_id: agent,
-            human_principal: None,
-            upstream: "mcp".to_string(),
-            region: std::env::var("CLOAKPIPE_REGION").unwrap_or_else(|_| "local".to_string()),
-        });
-    if let Some(release) = release {
-        builder = builder.release(release);
-    }
-    if let Some((key, code)) = gate {
-        builder = builder.metadata(key, cloakpipe_ledger::MetadataValue::OpaqueId(code));
-    }
-    let appended = builder
-        .build()
+    let build = |entries: &[(&str, String)]| {
+        let mut builder = RecordBuilder::new()
+            .seq(next_seq)
+            .tenant(tenant)
+            .hop(hop)
+            .detection(Detection {
+                entity_type: "mcp".to_string(),
+                count: count as u32,
+                detector: cloakpipe_ledger::Detector::Regex,
+            })
+            .action(Action {
+                entity_type: "mcp".to_string(),
+                kind,
+                token_ref: Some(uuid::Uuid::new_v4().to_string()),
+            })
+            .identities(Identity {
+                agent_id: agent,
+                human_principal: None,
+                upstream: "mcp".to_string(),
+                region: std::env::var("CLOAKPIPE_REGION").unwrap_or_else(|_| "local".to_string()),
+            });
+        if let Some(release) = release {
+            builder = builder.release(release);
+        }
+        for (key, value) in entries {
+            builder = builder.metadata(*key, cloakpipe_ledger::MetadataValue::OpaqueId(value.clone()));
+        }
+        builder.build()
+    };
+    let record = match build(gate) {
+        Err(e) if gate.len() > 1 => {
+            tracing::warn!(hop = ?hop, "evidence ledger: gate detail refused ({e}); recording the reason code only");
+            build(&gate[..1])
+        }
+        other => other,
+    };
+    let appended = record
         .map_err(|e| e.to_string())
         .and_then(|mut record| store.append(&tenant, &mut record).map(|_| ()).map_err(|e| e.to_string()));
     if let Err(e) = appended {
