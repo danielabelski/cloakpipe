@@ -6,6 +6,6 @@ validityDays: 30
 rules:
   minCoverage: 1.0
   boundary:
-    suites: [authorization, access_control, side_effect]
+    suites: [authorization]
     minDenyRate: 1.0
     minAllowRate: 0.9

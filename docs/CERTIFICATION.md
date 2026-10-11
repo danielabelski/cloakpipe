@@ -244,26 +244,30 @@ validityDays: 30
 rules:
   minCoverage: 1.0
   boundary:
-    suites: [authorization, access_control, side_effect]
+    suites: [authorization]
     minDenyRate: 1.0
     minAllowRate: 0.9
 ```
 
 `suites` are assurance suite names as runs list them in `covers`
 (`authorization`, `access_control`, `side_effect`, …); `minDenyRate`
-defaults to `1.0` and `minAllowRate` to `0.9`. For each listed suite that a
-candidate run covers, the labelled cases of all such runs are pooled:
+defaults to `1.0` and `minAllowRate` to `0.9`. List every suite whose
+boundary the release must hold (for example `[authorization,
+access_control, side_effect]`); each listed suite needs a run that covers
+it. For each listed suite, the labelled cases of all candidate runs that
+cover it are pooled:
 
 | Reason | When |
 |---|---|
 | `under_blocking` | deny rate = passed deny cases / deny cases < `minDenyRate` (a forbidden action went through) |
 | `over_refusal` | allow rate = passed allow cases / allow cases < `minAllowRate` (legitimate work was refused) |
-| `boundary_incomplete` | the suite has no labelled case, no deny case, or no allow case |
+| `boundary_incomplete` | no run covers the suite, or it has no labelled case, no deny case, or no allow case |
 
 A skipped, failed or errored labelled case is not passed. Unlabelled cases
 are ignored by this check (they still count for pass rate and coverage). A
-listed suite that no run covers is not checked here; list it in required
-suites (`--require`) to demand evidence for it (`missing_suite`). Like
+listed suite that no run covers is `boundary_incomplete`, so a run that
+claims to cover a different suite cannot skip the check; when the suite is
+also required (`--require`) it is reported once, as `missing_suite`. Like
 every reason, these appear in the `certify` output and in the signed
 decision (`predicate.certification.decision.reasons[].code`, with
 `observed`/`required` rates). A policy without `boundary` and runs without
@@ -271,7 +275,9 @@ labels hash and decide exactly as before.
 
 Labels come from the JUnit property `cloakpipe.expect`, the native JSON
 case field `expect`, and `metadata["cloakpipe.expect"]` on Braintrust events
-and Langfuse experiment items. Any other value is rejected on import:
+and Langfuse experiment items. Any other value is rejected on import,
+including `null`, and so is Braintrust or Langfuse `metadata` that is not
+an object: a label that cannot be read never drops a case silently.
 
 ```xml
 <testcase classname="authz" name="reads_other_tenant">

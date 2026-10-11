@@ -96,9 +96,16 @@ pub struct CaseResult {
     pub duration_ms: Option<u64>,
     /// Boundary label: whether the case's action should be allowed or
     /// denied (`rules.boundary`). Not serialized when absent, so unlabelled
-    /// runs keep their hashes.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// runs keep their hashes. Absent means unlabelled; an explicit `null`
+    /// is rejected, so an unreadable label cannot silently drop the case
+    /// from the boundary.
+    #[serde(default, skip_serializing_if = "Option::is_none", deserialize_with = "present_expect")]
     pub expect: Option<Expect>,
+}
+
+/// `expect` when the key is present: `"allow"` or `"deny"`, never `null`.
+fn present_expect<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<Expect>, D::Error> {
+    Expect::deserialize(d).map(Some)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]

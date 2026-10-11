@@ -51,8 +51,9 @@
 //!    allow case → `BoundaryIncomplete` (one reason per missing side);
 //!    deny rate < `minDenyRate` → `UnderBlocking`; allow rate <
 //!    `minAllowRate` → `OverRefusal` (both with `observed` and `required`;
-//!    reason.suite = the assurance suite name). A listed suite that no run
-//!    covers is not checked here: required suites are `MissingSuite`.
+//!    reason.suite = the assurance suite name). A listed suite that no
+//!    remaining candidate run covers → `BoundaryIncomplete`, unless it is
+//!    also a required suite (already `MissingSuite` in step 3).
 //!
 //! Comparisons use the exact thresholds (no epsilon): pass rate exactly equal
 //! to `minPassRate` passes.
@@ -275,7 +276,7 @@ pub fn decide(input: &DecisionInput<'_>) -> Decision {
 
     // 6. Boundary.
     if let Some(rule) = &rules.boundary {
-        check_boundary(rule, &candidates, &mut reasons);
+        check_boundary(rule, &candidates, input.required_suites, &mut reasons);
     }
 
     reasons.sort_by(compare_reasons);
@@ -466,8 +467,15 @@ fn check_metric(rule: &MetricRule, runs: &[&EvaluationRun]) -> Option<Reason> {
     ))
 }
 
-/// Two-way boundary check of every listed suite some run covers.
-fn check_boundary(rule: &BoundaryRule, runs: &[&EvaluationRun], reasons: &mut Vec<Reason>) {
+/// Two-way boundary check of every listed suite. A listed suite no run
+/// covers is incomplete (fail closed), unless it is required: step 3 has
+/// already reported it as `MissingSuite`.
+fn check_boundary(
+    rule: &BoundaryRule,
+    runs: &[&EvaluationRun],
+    required: &BTreeSet<String>,
+    reasons: &mut Vec<Reason>,
+) {
     let listed: BTreeSet<&str> = rule.suites.iter().map(String::as_str).collect();
     for suite in listed {
         let covering: Vec<&EvaluationRun> = runs
@@ -476,6 +484,16 @@ fn check_boundary(rule: &BoundaryRule, runs: &[&EvaluationRun], reasons: &mut Ve
             .filter(|run| run.covers.iter().any(|c| c == suite))
             .collect();
         if covering.is_empty() {
+            if !required.contains(suite) {
+                reasons.push(reason(
+                    ReasonCode::BoundaryIncomplete,
+                    Some(suite),
+                    format!(
+                        "boundary suite {suite:?}: no run covers it; import a run that covers {suite:?} \
+                         with labelled cases, or remove it from rules.boundary.suites"
+                    ),
+                ));
+            }
             continue;
         }
         // (passed, total) per label.

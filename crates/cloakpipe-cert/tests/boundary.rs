@@ -69,7 +69,13 @@ fn policy(boundary: Option<BoundaryRule>) -> CertificationPolicy {
     }
 }
 
+/// Boundary on `authorization` only: a listed suite no run covers is itself
+/// `BoundaryIncomplete`, and most tests import a single authorization run.
 fn standard() -> Option<BoundaryRule> {
+    Some(boundary(&["authorization"], 1.0, 0.9))
+}
+
+fn three_suites() -> Option<BoundaryRule> {
     Some(boundary(&["authorization", "access_control", "side_effect"], 1.0, 0.9))
 }
 
@@ -167,16 +173,33 @@ fn incomplete_side_is_reported_and_the_other_side_still_checked() {
 }
 
 #[test]
-fn a_listed_suite_no_run_covers_is_not_checked() {
-    // Which suites a release needs comes from required suites (MissingSuite).
-    let d = go(&[run("support", &["functional"], vec![case("a", CaseStatus::Pass, None)])], &policy(standard()));
-    assert_eq!(d.outcome, Outcome::Certified, "{:#?}", d.reasons);
+fn a_listed_suite_no_run_covers_is_boundary_incomplete() {
+    // Listing a suite demands evidence for it: a run that claims to cover a
+    // different suite cannot slip past the boundary.
+    let policy = policy(Some(boundary(&["authorization"], 1.0, 0.9)));
+    let d = go(&[run("support", &["safety"], labelled(0, 10, 10, 0))], &policy);
+    assert_eq!(d.outcome, Outcome::Blocked);
+    assert_eq!(codes(&d), vec![ReasonCode::BoundaryIncomplete]);
+    let reason = &d.reasons[0];
+    assert_eq!(reason.suite.as_deref(), Some("authorization"));
+    assert!(reason.message.contains("no run covers"), "{}", reason.message);
+}
+
+#[test]
+fn a_listed_required_suite_no_run_covers_is_only_missing_suite() {
+    let policy = policy(Some(boundary(&["authorization"], 1.0, 0.9)));
+    let rel = release();
+    let required: BTreeSet<String> = ["authorization".to_string()].into();
+    let runs = [run("support", &["safety"], labelled(1, 0, 1, 0))];
+    let d = decide(&DecisionInput { release: &rel, required_suites: &required, runs: &runs, baseline_runs: &[], policy: &policy });
+    assert_eq!(codes(&d), vec![ReasonCode::MissingSuite]);
 }
 
 #[test]
 fn suites_not_listed_are_not_checked() {
     // A refuse-everything privacy run is not a boundary suite here.
-    let d = go(&[run("privacy", &["privacy"], labelled(0, 0, 10, 0))], &policy(standard()));
+    let authz = run("authz", &["authorization"], labelled(10, 0, 10, 0));
+    let d = go(&[authz, run("privacy", &["privacy"], labelled(0, 0, 10, 0))], &policy(standard()));
     assert_eq!(d.outcome, Outcome::Certified, "{:#?}", d.reasons);
 }
 
@@ -185,7 +208,7 @@ fn every_listed_suite_is_checked_separately() {
     let authz = run("authz", &["authorization"], labelled(10, 0, 10, 0));
     let acl = run("acl", &["access_control"], labelled(0, 10, 10, 0));
     let side = run("side", &["side_effect"], labelled(10, 0, 0, 10));
-    let d = go(&[authz, acl, side], &policy(standard()));
+    let d = go(&[authz, acl, side], &policy(three_suites()));
     let got: Vec<(ReasonCode, Option<&str>)> = d.reasons.iter().map(|r| (r.code, r.suite.as_deref())).collect();
     assert_eq!(
         got,
@@ -319,6 +342,17 @@ fn native_json_reads_expect() {
     assert_eq!(back.cases[1].expect, Some(Expect::Deny));
     v["cases"][0]["expect"] = json!("maybe");
     assert!(from_json(&v.to_string()).is_err());
+}
+
+#[test]
+fn native_json_rejects_a_null_expect() {
+    // A label that cannot be read must not drop the case from the boundary.
+    let mut v = serde_json::to_value(run("authz", &["authorization"], labelled(1, 0, 1, 0))).unwrap();
+    v["cases"][0]["expect"] = json!(null);
+    assert!(from_json(&v.to_string()).is_err());
+    // Absent is still unlabelled.
+    v["cases"][0].as_object_mut().unwrap().remove("expect");
+    assert_eq!(from_json(&v.to_string()).unwrap().cases[0].expect, None);
 }
 
 // ── JUnit ───────────────────────────────────────────────────────────────
@@ -463,5 +497,18 @@ fn langfuse_experiment_rejects_a_bad_expect_value() {
             assert!(issues.contains("metadata.cloakpipe.expect"), "{issues}");
         }
         other => panic!("expected Invalid, got {other:?}"),
+    }
+}
+
+#[test]
+fn langfuse_experiment_rejects_metadata_that_is_not_an_object() {
+    for bad in [json!("{\"cloakpipe.expect\":\"deny\"}"), json!([1]), json!(3), json!(true)] {
+        match lf(json!({"metadata": bad})) {
+            Err(ImportError::Invalid(issues)) => {
+                let issues = issues.join("\n");
+                assert!(issues.contains("metadata: expected an object"), "{issues}");
+            }
+            other => panic!("expected Invalid for {bad}, got {other:?}"),
+        }
     }
 }

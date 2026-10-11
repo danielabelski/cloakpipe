@@ -103,14 +103,16 @@ impl J {
     }
 }
 
-/// The boundary label `metadata["cloakpipe.expect"]` of a case: absent (or
-/// metadata that is not an object) → `None`; `"allow"`/`"deny"` → the label.
-/// Anything else, including `null` or the key given twice, is an error:
-/// a label that cannot be read must not silently drop the case from the
-/// boundary.
+/// The boundary label `metadata["cloakpipe.expect"]` of a case: metadata or
+/// the key absent (or metadata `null`) → `None`; `"allow"`/`"deny"` → the
+/// label. Anything else, including metadata that is not an object, a `null`
+/// label or the key given twice, is an error: a label that cannot be read
+/// must not silently drop the case from the boundary.
 pub(super) fn metadata_expect(metadata: Option<&J>) -> Result<Option<Expect>, String> {
-    let Some(J::Obj(entries)) = metadata else {
-        return Ok(None);
+    let entries = match metadata {
+        None | Some(J::Null) => return Ok(None),
+        Some(J::Obj(entries)) => entries,
+        Some(other) => return Err(format!("metadata: expected an object, found {}", other.kind())),
     };
     let mut found = entries.iter().filter(|(k, _)| k == PROP_EXPECT).map(|(_, v)| v);
     let value = match (found.next(), found.next()) {
