@@ -7,9 +7,11 @@
 //! - [`policy`]: the deterministic certification decision.
 //! - [`statement`]: signed, scoped, expiring certification attestations
 //!   (in-toto v1 in a DSSE envelope) and their offline verification.
+//! - [`approval`]: signed approval receipts for one exact tool call.
 //!
 //! The contract is specified in `docs/CERTIFICATION.md`.
 
+pub mod approval;
 pub mod import;
 pub mod model;
 pub mod policy;

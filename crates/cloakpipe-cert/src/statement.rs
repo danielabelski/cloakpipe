@@ -252,7 +252,7 @@ pub fn verify(envelope: &Envelope, ctx: &VerifyContext) -> Report {
 /// `serde_json::Value` silently keeps the last duplicate, so a payload with
 /// duplicate keys could be read differently by another verifier; it is
 /// treated as undecodable JSON.
-struct NoDuplicateKeys;
+pub(crate) struct NoDuplicateKeys;
 
 impl<'de> Deserialize<'de> for NoDuplicateKeys {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
@@ -328,17 +328,7 @@ impl Findings {
 /// Invalid unless some signature verifies under a trusted key with a
 /// matching keyid; Revoked when any verifying signature's keyid is revoked.
 fn check_signatures(envelope: &Envelope, payload: &[u8], ctx: &VerifyContext, f: &mut Findings) {
-    let message = pae(&envelope.payload_type, payload);
-    let mut verified = BTreeSet::new();
-    let mut problems = Vec::new();
-    for (i, s) in envelope.signatures.iter().enumerate() {
-        match check_signature(s, &message, &ctx.trusted) {
-            Ok(()) => {
-                verified.insert(s.keyid.as_str());
-            }
-            Err(problem) => problems.push(format!("signatures[{i}] (keyid {:?}): {problem}", s.keyid)),
-        }
-    }
+    let (verified, problems) = verified_keyids(envelope, payload, &ctx.trusted);
 
     if verified.is_empty() {
         f.invalid("signature: no signature verifies under a trusted key with a matching keyid");
@@ -348,6 +338,28 @@ fn check_signatures(envelope: &Envelope, payload: &[u8], ctx: &VerifyContext, f:
             f.push(Status::Revoked, format!("signing key {keyid:?} is revoked"));
         }
     }
+}
+
+/// The keyids whose signatures verify over `payload` (DSSE PAE with the
+/// envelope's payloadType) under a trusted key with a matching keyid, and a
+/// description of each signature that does not.
+pub(crate) fn verified_keyids<'a>(
+    envelope: &'a Envelope,
+    payload: &[u8],
+    trusted: &[TrustedKey],
+) -> (BTreeSet<&'a str>, Vec<String>) {
+    let message = pae(&envelope.payload_type, payload);
+    let mut verified = BTreeSet::new();
+    let mut problems = Vec::new();
+    for (i, s) in envelope.signatures.iter().enumerate() {
+        match check_signature(s, &message, trusted) {
+            Ok(()) => {
+                verified.insert(s.keyid.as_str());
+            }
+            Err(problem) => problems.push(format!("signatures[{i}] (keyid {:?}): {problem}", s.keyid)),
+        }
+    }
+    (verified, problems)
 }
 
 fn check_signature(s: &Signature, message: &[u8], trusted: &[TrustedKey]) -> Result<(), &'static str> {
@@ -503,7 +515,7 @@ fn check_validity_window(c: &Certification, ctx: &VerifyContext, f: &mut Finding
 /// RFC 3339 `date-time`. chrono also accepts a space between date and time,
 /// which the RFC 3339 ABNF does not (it requires `T` or `t`), so the
 /// separator is checked first.
-fn parse_rfc3339(value: &str) -> Option<DateTime<FixedOffset>> {
+pub(crate) fn parse_rfc3339(value: &str) -> Option<DateTime<FixedOffset>> {
     if !matches!(value.as_bytes().get(10), Some(b'T' | b't')) {
         return None;
     }
