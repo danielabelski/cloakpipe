@@ -799,6 +799,41 @@ fn hops_are_counted_by_type() {
     assert_eq!(l.first_hop_at.as_deref(), Some("2026-10-03T10:00:00Z"));
 }
 
+/// Operation outcomes (docs/ACTION_BOUNDARY.md): a result hop with
+/// `operation_state=unknown`, then the operator's reconciliation, are their
+/// own release-bound categories in the auditor's report.
+#[test]
+fn operation_reconciliation_hops_are_counted_by_type() {
+    use cloakpipe_ledger::{Hop, MetadataValue, RecordBuilder};
+    let mut store = cloakpipe_ledger::LedgerStore::open(":memory:").unwrap();
+    let tenant = uuid::Uuid::from_u128(42);
+    let ts: chrono::DateTime<chrono::Utc> = "2026-10-03T10:00:00Z".parse().unwrap();
+    let op = || MetadataValue::OpaqueId("op-0123456789abcdef0123456789abcdef".into());
+    let hops = [
+        (Hop::McpToolCall, None),
+        (Hop::McpToolResult, Some("unknown")),
+        (Hop::OperationReconciled, Some("done")),
+    ];
+    for (seq, (hop, state)) in hops.into_iter().enumerate() {
+        let mut b = RecordBuilder::new().seq(seq as u64).tenant(tenant).ts(ts).hop(hop).release(release_bytes()).metadata("operation_id", op());
+        if let Some(state) = state {
+            b = b.metadata("operation_state", MetadataValue::OpaqueId(state.into()));
+        }
+        let mut r = b.build().unwrap();
+        store.append(&tenant, &mut r).unwrap();
+    }
+    let signer = cloakpipe_ledger::Ed25519Signer::from_bytes(&[LEDGER_SEED; 32]);
+    let bundle = to_verify_bundle(cloakpipe_ledger::export::export_bundle(&store, &tenant, &signer).unwrap());
+    let mut doc = pack_value();
+    doc["spec"]["ledgerExports"] = json!([bundle]);
+    let r = check(&resign(doc, EXPORTER_SEED));
+    assert_ok(&r);
+    let l = &r.ledger[0];
+    assert_eq!(l.release_hops, 3);
+    assert_eq!(l.release_hops_by_type.get("operation_reconciled"), Some(&1));
+    assert_eq!(l.release_hops_by_type.get("mcp_tool_result"), Some(&1));
+}
+
 // ── Malformed documents ─────────────────────────────────────────────────
 
 #[test]

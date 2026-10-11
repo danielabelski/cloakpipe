@@ -39,6 +39,10 @@ pub enum Hop {
     ReleaseCertified,
     /// An issued certification was revoked (control plane).
     CertificationRevoked,
+    /// An operator settled a side-effecting tool call whose outcome was
+    /// unknown (`cloakpipe operations reconcile`): `operation_id` and
+    /// `operation_state` (`done` / `not_applied`) metadata.
+    OperationReconciled,
 }
 
 impl Hop {
@@ -57,6 +61,7 @@ impl Hop {
             Hop::ReleasePromoted => "release_promoted",
             Hop::ReleaseCertified => "release_certified",
             Hop::CertificationRevoked => "certification_revoked",
+            Hop::OperationReconciled => "operation_reconciled",
         }
     }
 }
@@ -603,6 +608,22 @@ mod tests {
         assert_eq!(Hop::LlmPrompt.tag(), "llm_prompt");
         assert_eq!(Hop::McpToolCall.tag(), "mcp_tool_call");
         assert_eq!(Hop::Unmask.tag(), "unmask");
+    }
+
+    #[test]
+    fn operation_reconciled_hop_has_a_stable_tag_and_serde_name() {
+        // An operator's reconciliation of an operation whose outcome was
+        // unknown (docs/ACTION_BOUNDARY.md): its own auditable category.
+        assert_eq!(Hop::OperationReconciled.tag(), "operation_reconciled");
+        assert_eq!(serde_json::to_value(Hop::OperationReconciled).unwrap(), "operation_reconciled");
+        let r = RecordBuilder::new()
+            .hop(Hop::OperationReconciled)
+            .metadata("operation_id", MetadataValue::OpaqueId("op-0123456789abcdef0123456789abcdef".into()))
+            .metadata("operation_state", MetadataValue::OpaqueId("not_applied".into()))
+            .build()
+            .unwrap();
+        let canon = String::from_utf8(crate::canonical::canonicalize(&r)).unwrap();
+        assert!(canon.contains("\nhop=operation_reconciled\n"), "{canon}");
     }
 
     #[test]
