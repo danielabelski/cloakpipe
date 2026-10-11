@@ -626,6 +626,17 @@ pub struct McpProxyArgs {
     /// report.
     #[arg(long, value_parser = ["enforce", "warn"])]
     pub gate: Option<String>,
+    /// Tool contract (repeatable): argument-level rules for the tools it
+    /// covers. Each must be bound by the release (`spec.policies` entry
+    /// `policy:tool-contract/<name>@sha256:<digest>`), and every contract the
+    /// release binds must be supplied, or the proxy refuses to start.
+    #[arg(long = "tool-contract")]
+    pub tool_contracts: Vec<PathBuf>,
+    /// Trusted task context: a JSON object written by the orchestrator, e.g.
+    /// {"taskId":"t-981","tenant":"demo-co"}. `bindTo: task.<key>` arguments
+    /// must equal its values. Default: $CLOAKPIPE_TASK_CONTEXT.
+    #[arg(long = "task-context")]
+    pub task_context: Option<PathBuf>,
 }
 
 /// Build the tool gate for `mcp-proxy`; `Ok(None)` without `--manifest`.
@@ -639,7 +650,9 @@ pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::Tool
             || !a.revoked_statements.is_empty()
             || !a.revoked_keys.is_empty()
             || a.environment.is_some()
-            || a.gate.is_some();
+            || a.gate.is_some()
+            || !a.tool_contracts.is_empty()
+            || a.task_context.is_some();
         if gate_flags {
             return Err(usage("release gate flags need --manifest (the release they are about)"));
         }
@@ -685,5 +698,34 @@ pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::Tool
         _ => cloakpipe_mcp::GateMode::Enforce,
     };
     let environment = a.environment.as_deref().unwrap_or("production");
-    Ok(Some(cloakpipe_mcp::ToolGate::new(mode, &manifest, environment, certification, verify)))
+    let mut contracts = Vec::new();
+    for p in &a.tool_contracts {
+        let contract = cloakpipe_release::contract::ToolContract::parse_path(p).map_err(|e| match e {
+            cloakpipe_release::contract::ContractError::Io(..) => usage(format_args!("--tool-contract: {e}")),
+            _ => invalid(format_args!("--tool-contract {}: {e}", p.display())),
+        })?;
+        contracts.push(contract);
+    }
+    let task = task_context(a)?;
+    let gate = cloakpipe_mcp::ToolGate::new(mode, &manifest, environment, certification, verify);
+    // Refuse to start unless the contracts are exactly the ones the release binds.
+    let gate = gate.with_contracts(contracts, task).map_err(usage)?;
+    Ok(Some(gate))
+}
+
+/// The trusted task context: `--task-context`, else `$CLOAKPIPE_TASK_CONTEXT`.
+/// It comes only from the operator, never from MCP messages.
+fn task_context(a: &McpProxyArgs) -> Res<Option<serde_json::Value>> {
+    let path = a
+        .task_context
+        .clone()
+        .or_else(|| std::env::var_os("CLOAKPIPE_TASK_CONTEXT").filter(|v| !v.is_empty()).map(PathBuf::from));
+    let Some(path) = path else { return Ok(None) };
+    let src = read(&path)?;
+    let task: serde_json::Value = serde_json::from_str(&src)
+        .map_err(|e| invalid(format_args!("task context {}: not JSON: {e}", path.display())))?;
+    if !task.is_object() {
+        return Err(invalid(format_args!("task context {}: must be a JSON object", path.display())));
+    }
+    Ok(Some(task))
 }
