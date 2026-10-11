@@ -6,6 +6,7 @@
 //! parses and validates manifests, computes their canonical hash, and diffs two
 //! releases to decide which assurance suites a change requires.
 
+pub mod action;
 mod canonical;
 pub mod contract;
 mod diff;
