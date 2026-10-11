@@ -428,6 +428,40 @@ fn a_request_reusing_an_in_flight_operations_id_cannot_settle_it() {
     assert_eq!(replies.len(), 1, "the call's own reply still reaches the agent: {msgs:?}");
 }
 
+/// `--gate warn` forwards a call that fails the gate, and still tracks it
+/// as an operation: a lost reply is unknown and a retry is refused.
+#[test]
+fn warn_mode_tracks_a_side_effecting_call_that_fails_the_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let warn_gate = |dir: &Path| {
+        // Approval required and no receipt: approval_required, forwarded in warn mode.
+        let c = contract(true);
+        let mut g = certified(&release_binding(&c))
+            .with_contracts(vec![c], Some(task()))
+            .unwrap()
+            .with_operations(OperationStore::open(dir.join("ops.db")).unwrap())
+            .unwrap();
+        g.mode = GateMode::Warn;
+        g
+    };
+    let msgs = run(dir.path(), Tool::LoseAck, warn_gate(dir.path()), &[call(1, &args())]);
+    assert_eq!(effects(dir.path()), 1, "warn mode forwarded the call: {msgs:?}");
+    let ops = OperationStore::open(dir.path().join("ops.db")).unwrap().list(None).unwrap();
+    assert_eq!(ops.len(), 1, "the forwarded call is an operation: {msgs:?}");
+    let op = ops[0].operation_id.clone();
+    assert_eq!(ops[0].state, OperationState::Unknown);
+    assert_eq!(answer(&msgs, 1)["error"]["data"]["reason"], "operation_unknown", "{msgs:?}");
+
+    let msgs = run(dir.path(), Tool::Ok, warn_gate(dir.path()), &[call(2, &args())]);
+    assert_eq!(answer(&msgs, 2)["error"]["data"]["reason"], "reconcile_before_retry", "{msgs:?}");
+    assert_eq!(effects(dir.path()), 1, "the retry never reached the tool");
+
+    let records = ledger(&dir.path().join("ledger.db"));
+    let forwarded = records.iter().find(|r| r.hop == Hop::McpToolCall).unwrap();
+    assert_eq!(meta(forwarded, "gate_violation"), Some("approval_required"), "{records:?}");
+    assert_eq!(meta(forwarded, "operation_id"), Some(op.as_str()), "{records:?}");
+}
+
 /// A side-effecting call may not reuse the id of another request still
 /// waiting for its reply either.
 #[test]

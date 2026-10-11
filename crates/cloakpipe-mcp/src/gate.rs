@@ -437,17 +437,36 @@ impl ToolGate {
         rule.check(arguments, self.task.as_ref())?;
         let arguments = arguments.unwrap_or(&Value::Null);
         let approval = if rule.requires_approval { Some(self.approve(tool, arguments, now)?) } else { None };
-        let operation = if !rule.side_effect {
-            None
-        } else if let Some(a) = &approval {
-            Some(OperationKey { operation_id: a.operation_id.clone(), fingerprint: a.fingerprint })
-        } else {
-            let release: ReleaseHash = self.release.parse().map_err(|_| Denial::OperationsUnavailable)?;
-            let fp = fingerprint(&release, tool, arguments);
-            let task_id = self.task_id().ok_or(Denial::TaskContextMissing { path: None })?;
-            Some(OperationKey { operation_id: derive_operation_id(task_id, &fp), fingerprint: fp })
-        };
+        let operation = if rule.side_effect { Some(self.operation_key(tool, arguments, approval.as_ref())?) } else { None };
         Ok(Authorization { approval, operation })
+    }
+
+    /// The operation a call to `tool` is, whether or not it passes the gate:
+    /// `--gate warn` forwards a call that fails it, and tracking a
+    /// side-effecting call is not a release rule. `None` when the contract
+    /// does not mark the tool `sideEffect: true`. The id is the approval
+    /// receipt's `operationId` when a receipt for this call verifies, else the
+    /// derived id.
+    pub fn operation(&self, tool: &str, arguments: Option<&Value>, now: &str) -> Result<Option<OperationKey>, Denial> {
+        let Some(rule) = self.contracts.get(tool).and_then(|c| c.rule(tool)) else { return Ok(None) };
+        if !rule.side_effect {
+            return Ok(None);
+        }
+        let arguments = arguments.unwrap_or(&Value::Null);
+        let approval = if rule.requires_approval { self.approve(tool, arguments, now).ok() } else { None };
+        self.operation_key(tool, arguments, approval.as_ref()).map(Some)
+    }
+
+    /// The operation of a side-effecting call: the receipt's `operationId`,
+    /// else derived from the task and the call.
+    fn operation_key(&self, tool: &str, arguments: &Value, approval: Option<&ApprovedCall>) -> Result<OperationKey, Denial> {
+        if let Some(a) = approval {
+            return Ok(OperationKey { operation_id: a.operation_id.clone(), fingerprint: a.fingerprint });
+        }
+        let release: ReleaseHash = self.release.parse().map_err(|_| Denial::OperationsUnavailable)?;
+        let fp = fingerprint(&release, tool, arguments);
+        let task_id = self.task_id().ok_or(Denial::TaskContextMissing { path: None })?;
+        Ok(OperationKey { operation_id: derive_operation_id(task_id, &fp), fingerprint: fp })
     }
 
     /// The trusted task context's `taskId`.

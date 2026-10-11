@@ -199,28 +199,47 @@ where
                                 // A refusal, and whether it holds in warn mode too.
                                 let mut refusal: Option<(Denial, bool)> = None;
                                 let mut replay: Option<(Value, String)> = None;
+                                // The operation this call is, if it is side-effecting.
+                                let mut operation = None;
+                                let mut approved = false;
                                 match gate.authorize(&tool, arguments, &now) {
                                     Ok(auth) => {
-                                        if let Some(approved) = &auth.approval {
+                                        if let Some(a) = &auth.approval {
                                             // The receipt's digest, never the call fingerprint
                                             // (a plain hash of the arguments).
-                                            evidence.push(("approval", MetadataValue::Hash(approved.receipt_digest)));
-                                            evidence.push(opaque("operation_id", &approved.operation_id));
+                                            evidence.push(("approval", MetadataValue::Hash(a.receipt_digest)));
+                                            evidence.push(opaque("operation_id", &a.operation_id));
+                                            approved = true;
                                         }
-                                        if let Some(op) = &auth.operation {
-                                            if auth.approval.is_none() {
-                                                evidence.push(opaque("operation_id", &op.operation_id));
-                                            }
-                                            // Exactly-once bookkeeping is not a release rule:
-                                            // it holds in warn mode too.
-                                            match coordinate(&operations, &pending, &vault, msg.get("id"), &tool, op) {
-                                                Coordinated::Forward => {}
-                                                Coordinated::Replay(result) => replay = Some((result, op.operation_id.clone())),
-                                                Coordinated::Deny(d) => refusal = Some((d, true)),
-                                            }
-                                        }
+                                        operation = auth.operation;
                                     }
-                                    Err(denial) => refusal = Some((denial, false)),
+                                    Err(denial) => {
+                                        // Warn mode forwards it: a side-effecting call is
+                                        // still an operation (tracking is not a release rule).
+                                        if gate.mode == GateMode::Warn {
+                                            match gate.operation(&tool, arguments, &now) {
+                                                Ok(op) => operation = op,
+                                                Err(d) => refusal = Some((d, true)),
+                                            }
+                                        }
+                                        refusal = refusal.or(Some((denial, false)));
+                                    }
+                                }
+                                let forwarding = match &refusal {
+                                    None => true,
+                                    Some((_, always)) => !always && gate.mode == GateMode::Warn,
+                                };
+                                if let Some(op) = operation.as_ref().filter(|_| forwarding) {
+                                    if !approved {
+                                        evidence.push(opaque("operation_id", &op.operation_id));
+                                    }
+                                    // Exactly-once bookkeeping is not a release rule:
+                                    // it holds in warn mode too.
+                                    match coordinate(&operations, &pending, &vault, msg.get("id"), &tool, op) {
+                                        Coordinated::Forward => {}
+                                        Coordinated::Replay(result) => replay = Some((result, op.operation_id.clone())),
+                                        Coordinated::Deny(d) => refusal = Some((d, true)),
+                                    }
                                 }
                                 if let Some((result, operation_id)) = replay {
                                     // Already done: answer with the stored result and
