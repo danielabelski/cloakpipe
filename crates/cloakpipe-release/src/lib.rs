@@ -7,6 +7,7 @@
 //! releases to decide which assurance suites a change requires.
 
 mod canonical;
+pub mod contract;
 mod diff;
 mod manifest;
 pub mod namespace;
