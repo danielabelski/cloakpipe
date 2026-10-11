@@ -19,7 +19,7 @@
 use anyhow::{Context, Result};
 use cloakpipe_core::{detector::Detector, rehydrator::Rehydrator, replacer::Replacer, vault::Vault};
 use cloakpipe_ledger::{
-    record::Identity, store::LedgerStore, Action, ActionKind, Detection, Hop, RecordBuilder,
+    record::Identity, store::LedgerStore, Action, ActionKind, Detection, Hop, MetadataValue, RecordBuilder,
 };
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
@@ -99,7 +99,7 @@ where
                 // forwarded — as re-serialized here, never the raw line.
                 if let Some(gate) = &gate {
                     if let Err((reason, code)) = screen(&line) {
-                        record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, &[("gate_denial", reason.to_string())]);
+                        record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, &[opaque("gate_denial", reason)]);
                         let refusal = serde_json::json!({
                             "jsonrpc": "2.0",
                             "id": Value::Null,
@@ -118,55 +118,67 @@ where
                 let out = match serde_json::from_str::<Value>(&line) {
                     Ok(mut msg) => {
                         if msg.get("method").and_then(Value::as_str) == Some("tools/call") {
-                            let mut violation = Vec::new();
+                            // Ledger metadata for the forwarded call: a warn-mode
+                            // violation, or the approval it was allowed on.
+                            let mut evidence = Vec::new();
                             if let Some(gate) = &gate {
                                 let tool = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("");
                                 let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
                                 // The raw arguments, as the agent sent them: masking
                                 // happens only after the gate has passed the call.
                                 let arguments = msg.pointer("/params/arguments");
-                                if let Err(denial) = gate.check(tool, arguments, &now) {
-                                    let code = denial.code();
-                                    // A contract path comes from the contract, never
-                                    // from the call, so it is safe to record.
-                                    let path = denial.path().map(str::to_string);
-                                    if gate.mode == GateMode::Enforce {
-                                        let mut meta = vec![("gate_denial", code.clone())];
-                                        meta.extend(path.clone().map(|p| ("gate_path", p)));
-                                        record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, &meta);
-                                        // A notification (no id member) takes no response;
-                                        // `"id": null` is a request and is answered.
-                                        if let Some(id) = msg.get("id") {
-                                            let mut data = serde_json::json!({ "reason": code, "tool": tool, "release": gate.release() });
-                                            if let Some(path) = &path {
-                                                data["path"] = Value::String(path.clone());
-                                            }
-                                            let refusal = serde_json::json!({
-                                                "jsonrpc": "2.0",
-                                                "id": id,
-                                                "error": {
-                                                    "code": TOOL_REFUSED,
-                                                    "message": format!("tool call refused by CloakPipe: {code}"),
-                                                    "data": data,
-                                                },
-                                            });
-                                            if write_line(&agent_out, &refusal.to_string()).is_err() {
-                                                break;
-                                            }
+                                match gate.authorize(tool, arguments, &now) {
+                                    Ok(auth) => {
+                                        if let Some(approved) = auth.approval {
+                                            // The receipt's digest, never the call fingerprint
+                                            // (a plain hash of the arguments).
+                                            evidence.push(("approval", MetadataValue::Hash(approved.receipt_digest)));
+                                            evidence.push(opaque("operation_id", &approved.operation_id));
                                         }
-                                        continue;
                                     }
-                                    tracing::warn!(reason = %code, "MCP tool call fails the release gate (warn mode: forwarded)");
-                                    violation.push(("gate_violation", code));
-                                    violation.extend(path.map(|p| ("gate_path", p)));
+                                    Err(denial) => {
+                                        let code = denial.code();
+                                        // A contract path comes from the contract, never
+                                        // from the call, so it is safe to record.
+                                        let path = denial.path().map(str::to_string);
+                                        if gate.mode == GateMode::Enforce {
+                                            let mut meta = vec![opaque("gate_denial", &code)];
+                                            meta.extend(path.as_deref().map(|p| opaque("gate_path", p)));
+                                            record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, &meta);
+                                            // A notification (no id member) takes no response;
+                                            // `"id": null` is a request and is answered.
+                                            if let Some(id) = msg.get("id") {
+                                                let mut data = serde_json::json!({ "reason": code, "tool": tool, "release": gate.release() });
+                                                if let Some(path) = &path {
+                                                    data["path"] = Value::String(path.clone());
+                                                }
+                                                let refusal = serde_json::json!({
+                                                    "jsonrpc": "2.0",
+                                                    "id": id,
+                                                    "error": {
+                                                        "code": TOOL_REFUSED,
+                                                        "message": format!("tool call refused by CloakPipe: {code}"),
+                                                        "data": data,
+                                                    },
+                                                });
+                                                if write_line(&agent_out, &refusal.to_string()).is_err() {
+                                                    break;
+                                                }
+                                            }
+                                            continue;
+                                        }
+                                        tracing::warn!(reason = %code, "MCP tool call fails the release gate (warn mode: forwarded)");
+                                        evidence.push(opaque("gate_violation", &code));
+                                        evidence.extend(path.as_deref().map(|p| opaque("gate_path", p)));
+                                    }
                                 }
                             }
                             let masked = {
                                 let mut v = vault.lock().expect("vault poisoned");
                                 mask_value(msg.pointer_mut("/params/arguments"), &detector, &mut v)
                             };
-                            if masked > 0 || !violation.is_empty() {
-                                record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, masked, ActionKind::Pseudonymize, &violation);
+                            if masked > 0 || !evidence.is_empty() {
+                                record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, masked, ActionKind::Pseudonymize, &evidence);
                             }
                         }
                         serde_json::to_string(&msg).unwrap_or(line)
@@ -341,11 +353,17 @@ pub fn stable_ids() -> (uuid::Uuid, uuid::Uuid) {
     )
 }
 
+/// A string metadata entry (reason codes, contract paths, operation ids).
+fn opaque(key: &'static str, value: &str) -> (&'static str, MetadataValue) {
+    (key, MetadataValue::OpaqueId(value.to_string()))
+}
+
 /// Append a no-PII hop record (categories/count only, never text). Best-effort.
-/// `gate` adds metadata entries: a gate reason code first, then optional
-/// detail (`gate_path`). Should the ledger's PII check refuse the detail (a
+/// `gate` adds metadata entries: the primary one first (a gate reason code,
+/// or the approval receipt digest), then optional detail (`gate_path`,
+/// `operation_id`). Should the ledger's PII check refuse the detail (a
 /// contract property named `phone`, say), the hop is recorded with the
-/// reason code alone rather than lost.
+/// primary entry alone rather than lost.
 #[allow(clippy::too_many_arguments)]
 fn record_hop(
     ledger: &SharedLedger,
@@ -355,7 +373,7 @@ fn record_hop(
     hop: Hop,
     count: usize,
     kind: ActionKind,
-    gate: &[(&str, String)],
+    gate: &[(&str, MetadataValue)],
 ) {
     let Some(ledger) = ledger else { return };
     let Ok(mut store) = ledger.lock() else {
@@ -369,7 +387,7 @@ fn record_hop(
             return;
         }
     };
-    let build = |entries: &[(&str, String)]| {
+    let build = |entries: &[(&str, MetadataValue)]| {
         let mut builder = RecordBuilder::new()
             .seq(next_seq)
             .tenant(tenant)
@@ -394,7 +412,7 @@ fn record_hop(
             builder = builder.release(release);
         }
         for (key, value) in entries {
-            builder = builder.metadata(*key, cloakpipe_ledger::MetadataValue::OpaqueId(value.clone()));
+            builder = builder.metadata(*key, value.clone());
         }
         builder.build()
     };

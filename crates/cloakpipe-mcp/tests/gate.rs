@@ -335,3 +335,224 @@ mod contracts {
         assert_eq!(Denial::UndeclaredTool.path(), None);
     }
 }
+
+// ── signed approval receipts ────────────────────────────────────────────
+
+mod approvals {
+    use super::*;
+    use cloakpipe_cert::approval::{sign_approval, Approval};
+    use cloakpipe_mcp::ApprovedCall;
+    use cloakpipe_release::action::{fingerprint, ToolCallFingerprint};
+    use cloakpipe_release::contract::ToolContract;
+    use cloakpipe_release::{parse_path, ArtifactRef, Format, ReleaseHash};
+    use serde_json::Value;
+    use sha2::{Digest, Sha256};
+    use std::path::{Path, PathBuf};
+
+    fn example(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/action-boundary").join(name)
+    }
+
+    /// The example contract: approval on, operation tracking (item 3) off.
+    fn contract() -> ToolContract {
+        let src = std::fs::read_to_string(example("crm-tools.contract.yaml")).unwrap().replace("sideEffect: true", "sideEffect: false");
+        ToolContract::parse_str(&src, Format::Yaml).unwrap()
+    }
+
+    fn manifest() -> AgentRelease {
+        let mut m = parse_path(&example("release.yaml")).unwrap();
+        m.spec.policies.retain(|p| !p.reference.starts_with("policy:tool-contract/"));
+        m.spec.policies.push(ArtifactRef { reference: contract().policy_ref() });
+        m
+    }
+
+    fn release() -> ReleaseHash {
+        manifest().manifest_hash()
+    }
+
+    fn task() -> Value {
+        serde_json::from_str(&std::fs::read_to_string(example("task-context.json")).unwrap()).unwrap()
+    }
+
+    fn approver() -> SigningKey {
+        SigningKey::from_bytes(&[11u8; 32])
+    }
+
+    fn approvers() -> Vec<TrustedKey> {
+        vec![TrustedKey { keyid: "approver-1".into(), public_key: approver().verifying_key().to_bytes() }]
+    }
+
+    /// A certified gate for the example release with approvals read from `dir`.
+    fn gate_in(dir: &Path, task: Option<Value>) -> ToolGate {
+        let m = manifest();
+        let cert = envelope(&cert_for(&m.manifest_hash().to_string(), "certified", "production"));
+        ToolGate::new(GateMode::Enforce, &m, "production", Some(cert), trust())
+            .with_contracts(vec![contract()], task)
+            .unwrap()
+            .with_approvals(dir, approvers())
+    }
+
+    fn args() -> Value {
+        json!({"tenant": "demo-co", "record": "lead-42", "patch": {"stage": "review", "note": "called back"}})
+    }
+
+    fn approval() -> Approval {
+        Approval {
+            release: release().to_string(),
+            tool: "crm.patch".into(),
+            task_id: "t-981".into(),
+            operation_id: "op-7f3a".into(),
+            approver: "approver-1".into(),
+            approved_at: "2026-10-06T11:58:00Z".into(),
+            not_after: "2026-10-06T12:15:00Z".into(),
+        }
+    }
+
+    fn fp(a: &Value) -> ToolCallFingerprint {
+        fingerprint(&release(), "crm.patch", a)
+    }
+
+    /// Sign `approval` for the call with `signed_args` and file it under the
+    /// fingerprint of `filed_args`. Returns the receipt file's bytes.
+    fn file_receipt(dir: &Path, approval: &Approval, key: &SigningKey, signed: &ToolCallFingerprint, filed: &ToolCallFingerprint) -> Vec<u8> {
+        let env = sign_approval(signed, approval, key, "approver-1");
+        let bytes = serde_json::to_vec_pretty(&env).unwrap();
+        std::fs::write(dir.join(format!("{}.approval.json", filed.hex())), &bytes).unwrap();
+        bytes
+    }
+
+    fn approve(dir: &Path, a: &Approval) -> Vec<u8> {
+        file_receipt(dir, a, &approver(), &fp(&args()), &fp(&args()))
+    }
+
+    #[test]
+    fn an_approved_call_passes_and_names_its_receipt_and_operation() {
+        let dir = tempfile::tempdir().unwrap();
+        let bytes = approve(dir.path(), &approval());
+        let g = gate_in(dir.path(), Some(task()));
+        let auth = g.authorize("crm.patch", Some(&args()), NOW).unwrap();
+        let expected: [u8; 32] = Sha256::digest(&bytes).into();
+        assert_eq!(
+            auth.approval,
+            Some(ApprovedCall { receipt_digest: expected, operation_id: "op-7f3a".into(), fingerprint: fp(&args()) })
+        );
+        assert_eq!(g.check("crm.patch", Some(&args()), NOW), Ok(()));
+    }
+
+    #[test]
+    fn a_changed_argument_needs_its_own_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        approve(dir.path(), &approval());
+        let g = gate_in(dir.path(), Some(task()));
+        let mut changed = args();
+        changed["patch"]["stage"] = json!("qualified");
+        assert_eq!(g.check("crm.patch", Some(&changed), NOW), Err(Denial::ApprovalRequired));
+        let mut changed = args();
+        changed["patch"]["note"] = json!("called back!");
+        assert_eq!(g.check("crm.patch", Some(&changed), NOW), Err(Denial::ApprovalRequired));
+    }
+
+    #[test]
+    fn a_receipt_filed_under_another_calls_name_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut changed = args();
+        changed["patch"]["stage"] = json!("qualified");
+        // Approved for `args`, copied to the file name of `changed`.
+        file_receipt(dir.path(), &approval(), &approver(), &fp(&args()), &fp(&changed));
+        assert_eq!(gate_in(dir.path(), Some(task())).check("crm.patch", Some(&changed), NOW), Err(Denial::ApprovalInvalid));
+    }
+
+    #[test]
+    fn an_expired_receipt_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        approve(dir.path(), &approval());
+        let g = gate_in(dir.path(), Some(task()));
+        assert_eq!(g.check("crm.patch", Some(&args()), "2026-10-06T12:15:00Z"), Err(Denial::ApprovalExpired));
+    }
+
+    #[test]
+    fn a_receipt_from_an_untrusted_signer_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let mallory = SigningKey::from_bytes(&[66u8; 32]);
+        file_receipt(dir.path(), &approval(), &mallory, &fp(&args()), &fp(&args()));
+        assert_eq!(gate_in(dir.path(), Some(task())).check("crm.patch", Some(&args()), NOW), Err(Denial::ApprovalInvalid));
+    }
+
+    #[test]
+    fn a_receipt_for_another_task_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        approve(dir.path(), &Approval { task_id: "t-982".into(), ..approval() });
+        assert_eq!(gate_in(dir.path(), Some(task())).check("crm.patch", Some(&args()), NOW), Err(Denial::ApprovalInvalid));
+    }
+
+    #[test]
+    fn a_receipt_for_another_release_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        let other: ReleaseHash = format!("sha256:{}", "ee".repeat(32)).parse().unwrap();
+        // Signed for the same call under another release, filed where this
+        // release looks: the subject is another fingerprint.
+        let other_fp = fingerprint(&other, "crm.patch", &args());
+        let a = Approval { release: other.to_string(), ..approval() };
+        file_receipt(dir.path(), &a, &approver(), &other_fp, &fp(&args()));
+        assert_eq!(gate_in(dir.path(), Some(task())).check("crm.patch", Some(&args()), NOW), Err(Denial::ApprovalInvalid));
+        // This call's fingerprint, but the signed release is another one.
+        approve(dir.path(), &a);
+        assert_eq!(gate_in(dir.path(), Some(task())).check("crm.patch", Some(&args()), NOW), Err(Denial::ApprovalInvalid));
+    }
+
+    #[test]
+    fn an_unreadable_receipt_is_invalid() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(format!("{}.approval.json", fp(&args()).hex())), "{not json").unwrap();
+        assert_eq!(gate_in(dir.path(), Some(task())).check("crm.patch", Some(&args()), NOW), Err(Denial::ApprovalInvalid));
+    }
+
+    #[test]
+    fn without_approvals_configured_every_approval_gated_call_is_refused() {
+        let m = manifest();
+        let cert = envelope(&cert_for(&m.manifest_hash().to_string(), "certified", "production"));
+        let g = ToolGate::new(GateMode::Enforce, &m, "production", Some(cert), trust())
+            .with_contracts(vec![contract()], Some(task()))
+            .unwrap();
+        assert_eq!(g.check("crm.patch", Some(&args()), NOW), Err(Denial::ApprovalRequired));
+    }
+
+    #[test]
+    fn a_task_context_without_a_task_id_cannot_match_a_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        approve(dir.path(), &approval());
+        let mut t = task();
+        t.as_object_mut().unwrap().remove("taskId");
+        assert_eq!(
+            gate_in(dir.path(), Some(t)).check("crm.patch", Some(&args()), NOW),
+            Err(Denial::TaskContextMissing { path: None })
+        );
+    }
+
+    #[test]
+    fn arguments_are_checked_before_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut bad = args();
+        bad["tenant"] = json!("rival-co");
+        file_receipt(dir.path(), &approval(), &approver(), &fp(&bad), &fp(&bad));
+        assert_eq!(
+            gate_in(dir.path(), Some(task())).check("crm.patch", Some(&bad), NOW),
+            Err(Denial::ScopeMismatch { path: Some("/tenant".into()) }),
+            "an approval never widens the contract"
+        );
+    }
+
+    #[test]
+    fn tools_without_requires_approval_carry_no_approval() {
+        let dir = tempfile::tempdir().unwrap();
+        let g = gate_in(dir.path(), Some(task()));
+        assert_eq!(g.authorize("crm.lookup", None, NOW).unwrap().approval, None);
+    }
+
+    #[test]
+    fn approval_denial_codes_are_stable() {
+        assert_eq!(Denial::ApprovalRequired.code(), "approval_required");
+        assert_eq!(Denial::ApprovalInvalid.code(), "approval_invalid");
+        assert_eq!(Denial::ApprovalExpired.code(), "approval_expired");
+    }
+}

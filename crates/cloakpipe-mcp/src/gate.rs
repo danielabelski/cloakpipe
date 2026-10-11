@@ -21,12 +21,26 @@
 //! contract covers, [`ToolGate::check`] also validates the call's raw
 //! (pre-masking) arguments. Declared tools no contract covers keep the
 //! behaviour above.
+//!
+//! A contract tool with `requiresApproval: true` also needs a signed
+//! approval receipt for this exact call ([`cloakpipe_cert::approval`]): the
+//! gate computes the call's fingerprint
+//! ([`cloakpipe_release::action::fingerprint`] over the raw arguments),
+//! reads `<fingerprint hex>.approval.json` from the directory given to
+//! [`ToolGate::with_approvals`] and verifies it against the release, the
+//! tool, the task context's `taskId` and the trusted approver keys.
+//! [`ToolGate::authorize`] returns the receipt's digest and operation id so
+//! the call can be recorded against it.
 
-use cloakpipe_cert::statement::{verify, Envelope, Status, VerifyContext};
+use cloakpipe_cert::approval::{verify_approval, ApprovalCheck, ApprovalError};
+use cloakpipe_cert::statement::{verify, Envelope, Status, TrustedKey, VerifyContext};
+use cloakpipe_release::action::{fingerprint, ToolCallFingerprint};
 use cloakpipe_release::contract::{self, ToolContract, ViolationCode};
-use cloakpipe_release::{AgentRelease, Reference};
+use cloakpipe_release::{AgentRelease, Reference, ReleaseHash};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GateMode {
@@ -60,8 +74,14 @@ pub enum Denial {
     ScopeMismatch { path: Option<String> },
     /// A `bindTo` argument needs a task context (key) the gate does not have.
     TaskContextMissing { path: Option<String> },
-    /// The contract requires an approval receipt for this call.
+    /// The contract requires an approval receipt for this call and there is
+    /// none (any change to the arguments is a different call).
     ApprovalRequired,
+    /// The receipt for this call is malformed, not signed by a trusted
+    /// approver, or for another release, tool, task or call.
+    ApprovalInvalid,
+    /// The receipt for this call has passed its `notAfter`.
+    ApprovalExpired,
     /// The release binds a tool contract the gate was not given.
     ContractMissing,
 }
@@ -79,6 +99,8 @@ impl Denial {
             Denial::ScopeMismatch { .. } => ViolationCode::ScopeMismatch.code().into(),
             Denial::TaskContextMissing { .. } => ViolationCode::TaskContextMissing.code().into(),
             Denial::ApprovalRequired => "approval_required".into(),
+            Denial::ApprovalInvalid => "approval_invalid".into(),
+            Denial::ApprovalExpired => "approval_expired".into(),
             Denial::ContractMissing => "contract_missing".into(),
         }
     }
@@ -108,6 +130,31 @@ impl From<contract::Violation> for Denial {
             ViolationCode::TaskContextMissing => Denial::TaskContextMissing { path },
         }
     }
+}
+
+/// A call the gate let through on the strength of an approval receipt.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApprovedCall {
+    /// SHA-256 of the receipt file's bytes: what the ledger records
+    /// (`approval`), so an auditor holding the receipt can match it.
+    pub receipt_digest: [u8; 32],
+    /// The receipt's `operationId`.
+    pub operation_id: String,
+    /// The call's fingerprint (operator state; never recorded in the ledger).
+    pub fingerprint: ToolCallFingerprint,
+}
+
+/// What the gate establishes about an allowed call.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Authorization {
+    /// Set when the call needed, and has, a valid approval receipt.
+    pub approval: Option<ApprovedCall>,
+}
+
+/// Where approval receipts come from and who may sign them.
+struct Approvals {
+    dir: PathBuf,
+    approvers: Vec<TrustedKey>,
 }
 
 /// Why a gate cannot start with the given contracts.
@@ -163,6 +210,8 @@ pub struct ToolGate {
     contracts: BTreeMap<String, ToolContract>,
     /// The trusted task context (never from MCP messages).
     task: Option<Value>,
+    /// Approval receipts; `None`: every approval-gated call is refused.
+    approvals: Option<Approvals>,
 }
 
 impl ToolGate {
@@ -200,6 +249,7 @@ impl ToolGate {
             contract_refs,
             contracts: BTreeMap::new(),
             task: None,
+            approvals: None,
         }
     }
 
@@ -237,6 +287,14 @@ impl ToolGate {
         Ok(self)
     }
 
+    /// Read approval receipts from `dir` (`<fingerprint hex>.approval.json`)
+    /// and accept those signed by one of `approvers`. Without this, every
+    /// call to a tool whose contract requires approval is refused.
+    pub fn with_approvals(mut self, dir: impl Into<PathBuf>, approvers: Vec<TrustedKey>) -> Self {
+        self.approvals = Some(Approvals { dir: dir.into(), approvers });
+        self
+    }
+
     /// The release's manifest hash (`sha256:<hex>`).
     pub fn release(&self) -> &str {
         &self.release
@@ -250,6 +308,12 @@ impl ToolGate {
     /// Check one call to `tool` with its raw (pre-masking) `arguments` at
     /// RFC 3339 time `now`.
     pub fn check(&self, tool: &str, arguments: Option<&Value>, now: &str) -> Result<(), Denial> {
+        self.authorize(tool, arguments, now).map(|_| ())
+    }
+
+    /// [`Self::check`], also returning what the call was allowed on (its
+    /// approval receipt, when the contract requires one).
+    pub fn authorize(&self, tool: &str, arguments: Option<&Value>, now: &str) -> Result<Authorization, Denial> {
         if !self.tools.contains(tool) {
             return Err(Denial::UndeclaredTool);
         }
@@ -280,13 +344,55 @@ impl ToolGate {
         if !self.contracts_loaded {
             return Err(Denial::ContractMissing);
         }
-        let Some(rule) = self.contracts.get(tool).and_then(|c| c.rule(tool)) else { return Ok(()) };
+        let Some(rule) = self.contracts.get(tool).and_then(|c| c.rule(tool)) else { return Ok(Authorization::default()) };
         rule.check(arguments, self.task.as_ref())?;
-        if rule.requires_approval {
-            // No approval receipts yet: an approval-gated call is refused.
-            return Err(Denial::ApprovalRequired);
+        if !rule.requires_approval {
+            return Ok(Authorization::default());
         }
-        Ok(())
+        let approval = self.approve(tool, arguments.unwrap_or(&Value::Null), now)?;
+        Ok(Authorization { approval: Some(approval) })
+    }
+
+    /// Find and verify the approval receipt for this exact call.
+    fn approve(&self, tool: &str, arguments: &Value, now: &str) -> Result<ApprovedCall, Denial> {
+        let Some(approvals) = &self.approvals else { return Err(Denial::ApprovalRequired) };
+        let release: ReleaseHash = self.release.parse().map_err(|_| Denial::ApprovalInvalid)?;
+        let fp = fingerprint(&release, tool, arguments);
+        // The file name is hex: nothing from the call reaches the path.
+        let path = approvals.dir.join(format!("{}.approval.json", fp.hex()));
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Denial::ApprovalRequired),
+            Err(e) => {
+                tracing::warn!(error = %e, "approval receipt unreadable");
+                return Err(Denial::ApprovalInvalid);
+            }
+        };
+        let Some(task_id) = self.task.as_ref().and_then(|t| t.get("taskId")).and_then(Value::as_str) else {
+            return Err(Denial::TaskContextMissing { path: None });
+        };
+        let envelope: Envelope = serde_json::from_slice(&bytes).map_err(|_| Denial::ApprovalInvalid)?;
+        let check = ApprovalCheck {
+            fingerprint: fp,
+            release: &self.release,
+            tool,
+            task_id,
+            approvers: &approvals.approvers,
+            now,
+        };
+        match verify_approval(&envelope, &check) {
+            Ok(a) => Ok(ApprovedCall {
+                receipt_digest: Sha256::digest(&bytes).into(),
+                operation_id: a.operation_id,
+                fingerprint: fp,
+            }),
+            Err(ApprovalError::Expired) => Err(Denial::ApprovalExpired),
+            Err(e @ ApprovalError::Invalid(_)) => {
+                // Receipt diagnostics only: never argument values.
+                tracing::warn!(reason = %e, "approval receipt rejected");
+                Err(Denial::ApprovalInvalid)
+            }
+        }
     }
 }
 

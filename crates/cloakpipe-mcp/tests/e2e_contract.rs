@@ -278,3 +278,105 @@ fn a_contract_digest_not_in_the_release_refuses_to_start() {
     let err = certified(&m).with_contracts(vec![edited.clone()], Some(task())).err().expect("refused");
     assert!(err.to_string().contains(&edited.policy_ref()), "{err}");
 }
+
+// ── signed approval receipts ────────────────────────────────────────────
+
+mod approvals {
+    use super::*;
+    use cloakpipe_cert::approval::{sign_approval, Approval};
+    use cloakpipe_release::action::fingerprint;
+    use sha2::{Digest, Sha256};
+
+    /// The example contract with approval on and operation tracking off.
+    fn approval_contract() -> ToolContract {
+        let src = std::fs::read_to_string(example("crm-tools.contract.yaml")).unwrap().replace("sideEffect: true", "sideEffect: false");
+        ToolContract::parse_str(&src, Format::Yaml).unwrap()
+    }
+
+    fn approver() -> SigningKey {
+        SigningKey::from_bytes(&[21u8; 32])
+    }
+
+    fn approval_gate(dir: &Path) -> ToolGate {
+        let c = approval_contract();
+        let trusted = vec![TrustedKey { keyid: "approver-1".into(), public_key: approver().verifying_key().to_bytes() }];
+        certified(&release_binding(&c)).with_contracts(vec![c], Some(task())).unwrap().with_approvals(dir, trusted)
+    }
+
+    fn rfc3339(t: chrono::DateTime<chrono::Utc>) -> String {
+        t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+
+    /// File a receipt approving `arguments`, valid from `from` to `to`
+    /// minutes relative to now. Returns the receipt bytes.
+    fn approve(dir: &Path, key: &SigningKey, arguments: &Value, from: i64, to: i64) -> Vec<u8> {
+        let release = release_binding(&approval_contract()).manifest_hash();
+        let fp = fingerprint(&release, "crm.patch", arguments);
+        let now = chrono::Utc::now();
+        let a = Approval {
+            release: release.to_string(),
+            tool: "crm.patch".into(),
+            task_id: "t-981".into(),
+            operation_id: "op-2b0f8f9e".into(),
+            approver: "approver-1".into(),
+            approved_at: rfc3339(now + chrono::Duration::minutes(from)),
+            not_after: rfc3339(now + chrono::Duration::minutes(to)),
+        };
+        let bytes = serde_json::to_vec(&sign_approval(&fp, &a, key, "approver-1")).unwrap();
+        std::fs::write(dir.join(format!("{}.approval.json", fp.hex())), &bytes).unwrap();
+        bytes
+    }
+
+    #[test]
+    fn an_approved_call_reaches_the_tool_and_the_ledger_records_its_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let receipt = approve(dir.path(), &approver(), &args(), -1, 15);
+        let r = run(approval_gate(dir.path()), &[call(1, "crm.patch", args())]);
+        assert!(r.seen.contains("crm.patch") && r.seen.contains("qualified"), "{}", r.seen);
+        assert!(r.messages.iter().any(|m| m["id"] == 1 && m.get("result").is_some()), "{:?}", r.messages);
+        assert!(blocks(&r).is_empty(), "{:?}", r.records);
+
+        let calls: Vec<_> = r.records.iter().filter(|x| x.metadata.contains_key("approval")).collect();
+        assert_eq!(calls.len(), 1, "{:?}", r.records);
+        assert_eq!(calls[0].hop, cloakpipe_ledger::Hop::McpToolCall);
+        let digest: [u8; 32] = Sha256::digest(&receipt).into();
+        assert_eq!(calls[0].metadata.get("approval"), Some(&MetadataValue::Hash(digest)));
+        assert_eq!(calls[0].metadata.get("operation_id"), Some(&MetadataValue::OpaqueId("op-2b0f8f9e".into())));
+
+        // No raw argument value, and not the call fingerprint (a plain hash
+        // of the arguments) either.
+        let release = release_binding(&approval_contract()).manifest_hash();
+        let fp = fingerprint(&release, "crm.patch", &args());
+        no_values_in_ledger(&r, &["demo-co", "lead-42", "qualified", "called back"]);
+        let dump = format!("{:?}", r.records);
+        assert!(!dump.contains(&format!("{:?}", fp.0)) && !dump.contains(&fp.hex()), "fingerprint leaked: {dump}");
+    }
+
+    #[test]
+    fn a_changed_argument_is_refused_as_approval_required() {
+        let dir = tempfile::tempdir().unwrap();
+        approve(dir.path(), &approver(), &args(), -1, 15);
+        let mut changed = args();
+        changed["patch"]["stage"] = json!("review");
+        let r = run(approval_gate(dir.path()), &[call(2, "crm.patch", changed)]);
+        refused(&r, 2, "approval_required", None);
+        no_values_in_ledger(&r, &["review", "demo-co"]);
+    }
+
+    #[test]
+    fn an_expired_receipt_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        approve(dir.path(), &approver(), &args(), -30, -1);
+        let r = run(approval_gate(dir.path()), &[call(3, "crm.patch", args())]);
+        refused(&r, 3, "approval_expired", None);
+    }
+
+    #[test]
+    fn a_receipt_from_the_wrong_signer_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        approve(dir.path(), &SigningKey::from_bytes(&[99u8; 32]), &args(), -1, 15);
+        let r = run(approval_gate(dir.path()), &[call(4, "crm.patch", args())]);
+        refused(&r, 4, "approval_invalid", None);
+        assert!(!r.records.iter().any(|x| x.metadata.contains_key("approval")), "no approval recorded for a refused call");
+    }
+}
