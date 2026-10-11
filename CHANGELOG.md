@@ -11,6 +11,21 @@ may contain breaking changes; these are marked **Breaking**.
 
 ### Added
 
+- **Tool contracts (action boundary).** A new `kind: ToolContract` artifact
+  (`cloakpipe_release::contract`, `schemas/tool-contract.schema.json`) gives
+  argument-level rules for the tools a release calls: closed argument lists,
+  a small deterministic subset of JSON Schema, and `bindTo: task.<key>` to pin
+  an argument to a trusted task context. A release binds a contract in
+  `spec.policies` as `policy:tool-contract/<name>@sha256:<digest>`, so it is
+  covered by the certified release hash. `cloakpipe mcp-proxy` takes
+  `--tool-contract` (repeatable) and `--task-context` (or
+  `CLOAKPIPE_TASK_CONTEXT`), refuses to start unless the contracts are exactly
+  the ones the release binds, and checks each covered call's raw arguments
+  before masking. New denial reasons `argument_missing`,
+  `argument_not_allowed`, `argument_invalid`, `scope_mismatch`,
+  `task_context_missing` and `approval_required`; denial hops carry the
+  contract path as `gate_path`. See `docs/ACTION_BOUNDARY.md` and
+  `examples/action-boundary/`.
 - **Agent Release manifests.** A new `cloakpipe-release` crate gives an AI agent
   release an exact, verifiable identity: an `AgentRelease` manifest that only
   accepts immutable references, a canonical hash (RFC 8785), a material-change
@@ -88,6 +103,10 @@ may contain breaking changes; these are marked **Breaking**.
 
 ### Changed
 
+- **Breaking (library):** `cloakpipe_mcp::ToolGate::check` takes the call's
+  raw arguments (`check(tool, arguments, now)`), and `Denial` has new variants.
+  `cloakpipe mcp-proxy` gate configuration errors now exit with the documented
+  codes (2 usage, 1 invalid input) instead of 1.
 - **Breaking:** format identifiers moved from the legacy `cloakpipe.dev`
   namespace to `cloakpipe.co` (for example `apiVersion: cloakpipe.co/v1alpha1`,
   hash and signing domains, in-toto predicate types and the schema `$id`).

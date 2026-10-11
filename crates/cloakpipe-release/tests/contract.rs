@@ -62,6 +62,12 @@ fn the_example_release_binds_the_example_contract() {
 }
 
 #[test]
+fn the_docs_show_the_example_binding() {
+    let doc = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/ACTION_BOUNDARY.md")).unwrap();
+    assert!(doc.contains(&crm().policy_ref()), "docs/ACTION_BOUNDARY.md must show {}", crm().policy_ref());
+}
+
+#[test]
 fn the_digest_is_domain_separated_jcs_of_the_contract() {
     let c = crm();
     let raw: Value = serde_yaml::from_str(&std::fs::read_to_string(example("crm-tools.contract.yaml")).unwrap()).unwrap();

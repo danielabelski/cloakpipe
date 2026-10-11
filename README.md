@@ -47,7 +47,7 @@ CloakPipe is organised around four pillars: **Evaluate → Certify → Enforce �
 |---|---|---|
 | **Evaluate** | Import evaluation results as native, release-bound `EvaluationRun`s: **JUnit XML** (pytest, Jest, Go, JUnit, cargo-nextest), **Braintrust** experiments, **Langfuse** experiments (and legacy dataset runs). Score-based sources fail closed: an unscored case is an `error`, not a pass. | `cloakpipe eval import` |
 | **Certify** | Immutable, canonically hashed release manifests with a material-change diff that tells you which assurance suites a change requires. A pure, deterministic policy engine (pass rate, coverage, regressions vs. baseline, critical failures, metric thresholds) produces a decision signed as an **in-toto v1 Statement in a DSSE envelope** (Ed25519), scoped to an environment and expiring. Ships as a **GitHub Action**. | `cloakpipe release …`, [`.github/actions/certify`](.github/actions/certify) |
-| **Enforce** | **Privacy proxy**: OpenAI- and Anthropic-compatible HTTP proxy that detects PII, replaces it with consistent tokens, and restores originals in responses (including streaming), with an AES-256-GCM encrypted vault. **MCP interceptor**: masks PII in tool-call arguments and rehydrates results. **MCP tool gate**: only tools declared in the certified release run, and only while its certification verifies. | `cloakpipe start`, `cloakpipe mcp-proxy` |
+| **Enforce** | **Privacy proxy**: OpenAI- and Anthropic-compatible HTTP proxy that detects PII, replaces it with consistent tokens, and restores originals in responses (including streaming), with an AES-256-GCM encrypted vault. **MCP interceptor**: masks PII in tool-call arguments and rehydrates results. **MCP tool gate**: only tools declared in the certified release run, only while its certification verifies, and only with arguments its tool contracts allow. | `cloakpipe start`, `cloakpipe mcp-proxy` |
 | **Prove** | **Evidence ledger**: per-tenant hash chain of signed records that carry types, counts, hashes and references, never raw PII. **External anchoring** at an RFC 3161 TSA and Sigstore Rekor. **Release audit packs**: one signed JSON file with the manifest, runs, certifications, governance history and ledger exports. A **standalone verifier** with no dependency on any evidence producer. | `cloakpipe anchor`, `cloakpipe release audit-pack`, `cloakpipe-verify` |
 
 ## Architecture
@@ -291,6 +291,13 @@ A refused call never reaches the tool. The agent receives a JSON-RPC error:
 {"jsonrpc":"2.0","id":2,"error":{"code":-32001,"message":"tool call refused by CloakPipe: undeclared_tool",
  "data":{"reason":"undeclared_tool","tool":"delete_account","release":"sha256:236b3262…"}}}
 ```
+
+Add `--tool-contract crm-tools.contract.yaml --task-context task.json` to check
+each call's arguments too: closed argument lists, typed values, and arguments
+pinned to the task (`bindTo: task.tenant`), so a cross-tenant call is refused
+as `scope_mismatch`. The contract's digest is bound in the release, so it is
+certified with it. See [docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md) and
+[examples/action-boundary](examples/action-boundary).
 
 With `CLOAKPIPE_LEDGER_DB` set, every call, result and refusal is recorded as a
 release-bound ledger hop. The gate fails closed on unparseable messages,

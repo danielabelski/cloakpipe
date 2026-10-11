@@ -585,6 +585,18 @@ mod tests {
     }
 
     #[test]
+    fn tool_contract_paths_are_valid_opaque_ids() {
+        // The MCP gate records the contract path of an argument denial.
+        for path in ["/patch/stage", "/tenant", "/patch", "/tags/items", "/a~1b"] {
+            RecordBuilder::new()
+                .metadata("gate_denial", MetadataValue::OpaqueId("argument_invalid".into()))
+                .metadata("gate_path", MetadataValue::OpaqueId(path.into()))
+                .build()
+                .unwrap_or_else(|e| panic!("{path}: {e:?}"));
+        }
+    }
+
+    #[test]
     fn hop_tags_are_stable() {
         // Stable tags are part of the wire format — changing one breaks every
         // existing bundle. Lock them.
