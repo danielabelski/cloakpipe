@@ -637,6 +637,15 @@ pub struct McpProxyArgs {
     /// must equal its values. Default: $CLOAKPIPE_TASK_CONTEXT.
     #[arg(long = "task-context")]
     pub task_context: Option<PathBuf>,
+    /// Directory of approval receipts (`<fingerprint hex>.approval.json`, from
+    /// `cloakpipe approve`) for tools whose contract has requiresApproval.
+    /// Needs --approver-key.
+    #[arg(long)]
+    pub approvals: Option<PathBuf>,
+    /// Approver key file (repeatable; from `release keygen`, public part
+    /// only): receipts must be signed by one of these keys.
+    #[arg(long = "approver-key")]
+    pub approver_keys: Vec<PathBuf>,
 }
 
 /// Build the tool gate for `mcp-proxy`; `Ok(None)` without `--manifest`.
@@ -652,7 +661,9 @@ pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::Tool
             || a.environment.is_some()
             || a.gate.is_some()
             || !a.tool_contracts.is_empty()
-            || a.task_context.is_some();
+            || a.task_context.is_some()
+            || a.approvals.is_some()
+            || !a.approver_keys.is_empty();
         if gate_flags {
             return Err(usage("release gate flags need --manifest (the release they are about)"));
         }
@@ -707,10 +718,31 @@ pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::Tool
         contracts.push(contract);
     }
     let task = task_context(a)?;
+    let approvals = approvals(a)?;
     let gate = cloakpipe_mcp::ToolGate::new(mode, &manifest, environment, certification, verify);
     // Refuse to start unless the contracts are exactly the ones the release binds.
-    let gate = gate.with_contracts(contracts, task).map_err(usage)?;
+    let mut gate = gate.with_contracts(contracts, task).map_err(usage)?;
+    if let Some((dir, approvers)) = approvals {
+        gate = gate.with_approvals(dir, approvers);
+    }
     Ok(Some(gate))
+}
+
+/// `--approvals` with its `--approver-key`s: both or neither, and the
+/// directory must exist.
+fn approvals(a: &McpProxyArgs) -> Res<Option<(PathBuf, Vec<TrustedKey>)>> {
+    match (&a.approvals, a.approver_keys.is_empty()) {
+        (None, true) => Ok(None),
+        (None, false) => Err(usage("--approver-key needs --approvals (the receipts it verifies)")),
+        (Some(_), true) => Err(usage("--approvals needs at least one --approver-key (who may approve)")),
+        (Some(dir), false) => {
+            if !dir.is_dir() {
+                return Err(usage(format_args!("--approvals {}: not a directory", dir.display())));
+            }
+            let keys = a.approver_keys.iter().map(|p| trusted_key(p)).collect::<Res<Vec<_>>>()?;
+            Ok(Some((dir.clone(), keys)))
+        }
+    }
 }
 
 /// The trusted task context: `--task-context`, else `$CLOAKPIPE_TASK_CONTEXT`.

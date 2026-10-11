@@ -39,6 +39,7 @@ rand.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 dialoguer.workspace = true
 shell-words = "1"
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

@@ -115,6 +115,15 @@ pub fn is_valid_operation_id(id: &str) -> bool {
     (1..=128).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
 }
 
+/// Parse JSON (tool-call arguments, a task context) refusing duplicate
+/// object keys: a reader that kept the other duplicate would see another
+/// call than the one approved.
+pub fn parse_json_strict(src: &str) -> Result<Value, String> {
+    serde_json::from_str::<NoDuplicateKeys>(src)
+        .and_then(|_| serde_json::from_str::<Value>(src))
+        .map_err(|e| e.to_string())
+}
+
 /// Build the in-toto Statement of an approval for the call `fingerprint`.
 pub fn approval_statement(fingerprint: &ToolCallFingerprint, a: &Approval) -> Value {
     serde_json::json!({

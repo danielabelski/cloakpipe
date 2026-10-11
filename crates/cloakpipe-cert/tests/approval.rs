@@ -243,3 +243,12 @@ fn operation_ids_are_short_opaque_tokens() {
         assert!(!is_valid_operation_id(bad), "{bad:?}");
     }
 }
+
+#[test]
+fn arguments_with_duplicate_keys_are_refused() {
+    use cloakpipe_cert::approval::parse_json_strict;
+    assert_eq!(parse_json_strict(r#"{"a": {"b": 1}}"#).unwrap(), json!({"a": {"b": 1}}));
+    assert!(parse_json_strict(r#"{"a": 1, "a": 2}"#).is_err());
+    assert!(parse_json_strict(r#"{"a": {"b": 1, "b": 1}}"#).is_err());
+    assert!(parse_json_strict("{").is_err());
+}
