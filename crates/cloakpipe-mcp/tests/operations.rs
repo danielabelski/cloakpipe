@@ -308,3 +308,26 @@ fn an_existing_operation_id_key_is_kept() {
     assert_eq!(open(dir.path()).operation_id_key().unwrap().to_vec(), stored);
     assert_eq!(open(dir.path()).operation_id_key().unwrap().to_vec(), stored);
 }
+
+/// The database holds masked results and the operation-id key: on unix a new
+/// one (and the gate lock file) is readable by its owner only. An existing
+/// file's permissions are the operator's and are left alone.
+#[cfg(unix)]
+#[test]
+fn a_new_operations_database_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let mut s = open(dir.path());
+    s.recover().unwrap();
+    s.begin("op-1", "crm.patch", &DIGEST).unwrap();
+    assert_eq!(mode(&dir.path().join("ops.db")), 0o600);
+    assert_eq!(mode(&s.gate_lock_path()), 0o600);
+    drop(s);
+
+    let existing = dir.path().join("shared.db");
+    std::fs::write(&existing, b"").unwrap();
+    std::fs::set_permissions(&existing, std::fs::Permissions::from_mode(0o640)).unwrap();
+    drop(OperationStore::open(&existing).unwrap());
+    assert_eq!(mode(&existing), 0o640);
+}

@@ -206,6 +206,18 @@ impl OperationStore {
     /// changes no row; a gate also calls [`Self::recover`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self, OperationsError> {
         let path = path.as_ref().to_path_buf();
+        // It holds masked results and the operation-id key: a new database is
+        // owner-only on unix (SQLite gives its journal the same mode). An
+        // existing file keeps the permissions the operator gave it.
+        #[cfg(unix)]
+        if !path.as_os_str().is_empty() && path != Path::new(":memory:") {
+            use std::os::unix::fs::OpenOptionsExt;
+            match OpenOptions::new().write(true).create_new(true).mode(0o600).open(&path) {
+                Ok(_) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(OperationsError(format!("cannot create {}: {e}", path.display()))),
+            }
+        }
         let conn = Connection::open(&path)?;
         // The gate and `cloakpipe operations` may use the database at once.
         conn.busy_timeout(Duration::from_secs(10))?;

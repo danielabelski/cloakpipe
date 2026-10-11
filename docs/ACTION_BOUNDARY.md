@@ -293,14 +293,27 @@ operation_id_key(id INTEGER PRIMARY KEY, key BLOB)  -- one row
 `call_digest` is the call fingerprint and `result` the tool's result as it
 left the tool (masked, before rehydration). `operation_id_key` holds 32
 bytes from the operating system's CSPRNG, made when the database is created
-(a key already stored is kept): the key for derived
-operation ids. All three are local operator state and never go into the
-ledger. The proxy refuses to start (exit 2) when a supplied
-contract has a `sideEffect: true` tool and no operations database is given.
-One proxy per database: a running proxy holds an exclusive OS lock on
-`<db>.lock` beside the database for as long as it runs, and a second proxy
-on the same database refuses to start (exit 2) instead of marking the first
-one's live `in_flight` operations `unknown`. `cloakpipe operations list` and
+(a key already stored is kept): the key for derived operation ids. All
+three are local operator state and never go into the ledger.
+
+So `operations.result` keeps a local copy of each completed side-effecting
+call's upstream result. It is masked (PII the detector found is
+pseudonymized, never raw), but it is still the tool's output, and with the
+vault it can be rehydrated. Protect the database like the vault: on unix a
+new operations database (and its `<db>.lock`) is created with mode `0600`;
+keep it that way (`chmod 600` an existing one, which CloakPipe leaves as it
+finds it) and off shared or synced storage. Set a retention policy too: a
+`done` row's result is only needed to replay a retry of that call, so rows
+past your retry horizon can be deleted while no proxy runs (`DELETE FROM
+operations WHERE state = 'done' AND updated_at < '…'`); a later retry of a
+deleted call runs again.
+
+The proxy refuses to start (exit 2) when a supplied contract has a
+`sideEffect: true` tool and no operations database is given. One proxy per
+database: a running proxy holds an exclusive OS lock on `<db>.lock` beside
+the database for as long as it runs, and a second proxy on the same
+database refuses to start (exit 2) instead of marking the first one's live
+`in_flight` operations `unknown`. `cloakpipe operations list` and
 `reconcile` take no lock and work while a proxy runs.
 
 ### Operation ids
