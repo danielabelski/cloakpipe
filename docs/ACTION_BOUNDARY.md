@@ -296,7 +296,11 @@ random bytes made when the database is created: the key for derived
 operation ids. All three are local operator state and never go into the
 ledger. The proxy refuses to start (exit 2) when a supplied
 contract has a `sideEffect: true` tool and no operations database is given.
-Run one proxy per database.
+One proxy per database: a running proxy holds an exclusive OS lock on
+`<db>.lock` beside the database for as long as it runs, and a second proxy
+on the same database refuses to start (exit 2) instead of marking the first
+one's live `in_flight` operations `unknown`. `cloakpipe operations list` and
+`reconcile` take no lock and work while a proxy runs.
 
 ### Operation ids
 

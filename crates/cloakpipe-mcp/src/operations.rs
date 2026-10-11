@@ -23,11 +23,15 @@
 //! until an operator reconciles it) and `not_applied` (reconciled as not
 //! having happened; may be retried).
 //!
-//! One gate per operations database: a gate starting up marks every row
-//! left `in_flight` as `unknown` ([`OperationStore::recover`]).
+//! One gate per operations database: a gate starting up takes an exclusive
+//! OS lock on `<db>.lock` for as long as it runs, then marks every row left
+//! `in_flight` as `unknown` ([`OperationStore::recover`]). A second gate on
+//! the same database is refused instead of demoting the first one's live
+//! operations; `operations list` and `operations reconcile` take no lock.
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use std::path::Path;
+use std::fs::{File, OpenOptions, TryLockError};
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// Where an operation stands.
@@ -160,6 +164,10 @@ impl From<rusqlite::Error> for ReconcileError {
 /// The operations table.
 pub struct OperationStore {
     conn: Connection,
+    path: PathBuf,
+    /// The gate lock (`<db>.lock`, exclusive), held from [`Self::recover`]
+    /// until [`Self::release_gate`] or drop.
+    gate_lock: Option<File>,
 }
 
 fn now() -> String {
@@ -187,7 +195,8 @@ impl OperationStore {
     /// Open (creating if needed) the operations database at `path`. Opening
     /// changes no row; a gate also calls [`Self::recover`].
     pub fn open(path: impl AsRef<Path>) -> Result<Self, OperationsError> {
-        let conn = Connection::open(path)?;
+        let path = path.as_ref().to_path_buf();
+        let conn = Connection::open(&path)?;
         // The gate and `cloakpipe operations` may use the database at once.
         conn.busy_timeout(Duration::from_secs(10))?;
         conn.execute_batch(
@@ -205,7 +214,51 @@ impl OperationStore {
             );
             INSERT OR IGNORE INTO operation_id_key (id, key) VALUES (1, randomblob(32));",
         )?;
-        Ok(Self { conn })
+        Ok(Self { conn, path, gate_lock: None })
+    }
+
+    /// The lock file a running gate holds: `<db>.lock` beside the database.
+    pub fn gate_lock_path(&self) -> PathBuf {
+        let mut name = self.path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+        name.push(".lock");
+        self.path.with_file_name(name)
+    }
+
+    /// Take the database for this gate: an exclusive advisory lock on
+    /// [`Self::gate_lock_path`], held until [`Self::release_gate`] or drop
+    /// (or the process exits). Fails if another gate holds it.
+    fn claim_for_gate(&mut self) -> Result<(), OperationsError> {
+        if self.gate_lock.is_some() {
+            return Ok(());
+        }
+        let lock_path = self.gate_lock_path();
+        let mut options = OpenOptions::new();
+        options.read(true).write(true).create(true).truncate(false);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options
+            .open(&lock_path)
+            .map_err(|e| OperationsError(format!("cannot open gate lock {}: {e}", lock_path.display())))?;
+        match file.try_lock() {
+            Ok(()) => {
+                self.gate_lock = Some(file);
+                Ok(())
+            }
+            Err(TryLockError::WouldBlock) => Err(OperationsError(format!(
+                "{} is in use by another gate (lock {} is held): one gate per operations database; \
+                 stop the other mcp-proxy or give this one its own --operations-db",
+                self.path.display(),
+                lock_path.display()
+            ))),
+            Err(TryLockError::Error(e)) => {
+                Err(OperationsError(format!("cannot lock {}: {e}", lock_path.display())))
+            }
+        }
+    }
+
+    /// Give the database up (the gate has stopped): another gate may start.
+    pub fn release_gate(&mut self) {
+        self.gate_lock = None;
     }
 
     /// This database's secret key for derived operation ids
@@ -217,9 +270,12 @@ impl OperationStore {
         key.try_into().map_err(|_| OperationsError("operation id key is not 32 bytes".into()))
     }
 
-    /// Start-up sweep: every operation a previous process left `in_flight`
-    /// becomes `unknown` (its reply can no longer arrive). Returns their ids.
+    /// Start-up sweep: take the database for this gate (an error if another
+    /// gate holds it), then every operation a previous process left
+    /// `in_flight` becomes `unknown` (its reply can no longer arrive).
+    /// Returns their ids.
     pub fn recover(&mut self) -> Result<Vec<String>, OperationsError> {
+        self.claim_for_gate()?;
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let ids: Vec<String> = {
             let mut stmt = tx.prepare("SELECT operation_id FROM operations WHERE state = 'in_flight' ORDER BY operation_id")?;

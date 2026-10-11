@@ -414,6 +414,11 @@ where
         });
         let _ = write_line(&agent_out, &notice.to_string());
     }
+    // The gate has stopped: give the operations database up now, even if the
+    // egress thread (still parked on the agent's stdin) holds the store.
+    if let Some(Ok(mut s)) = operations.as_ref().map(|s| s.lock()) {
+        s.release_gate();
+    }
     Ok(())
 }
 

@@ -351,12 +351,14 @@ impl ToolGate {
         self
     }
 
-    /// Track `sideEffect` operations in `store`. Every operation a previous
-    /// process left `in_flight` becomes `unknown` now (see
-    /// [`Self::recovered_operations`]): one gate per operations database.
+    /// Track `sideEffect` operations in `store`. The gate takes the database
+    /// for as long as it lives (an error if another gate holds it), and
+    /// every operation a previous process left `in_flight` becomes `unknown`
+    /// now (see [`Self::recovered_operations`]): one gate per operations
+    /// database.
     pub fn with_operations(mut self, mut store: OperationStore) -> Result<Self, GateConfigError> {
-        self.recovered = store.recover().map_err(|e| GateConfigError::OperationsStore(e.to_string()))?;
-        self.operation_id_key = Some(store.operation_id_key().map_err(|e| GateConfigError::OperationsStore(e.to_string()))?);
+        self.recovered = store.recover().map_err(|e| GateConfigError::OperationsStore(e.0))?;
+        self.operation_id_key = Some(store.operation_id_key().map_err(|e| GateConfigError::OperationsStore(e.0))?);
         self.operations = Some(Arc::new(Mutex::new(store)));
         Ok(self)
     }

@@ -235,3 +235,36 @@ fn the_store_holds_a_stable_random_operation_id_key() {
     assert_ne!(open(other.path()).operation_id_key().unwrap(), key);
     assert_ne!(key, [0u8; 32]);
 }
+
+/// One gate per operations database: a second gate's start-up sweep would
+/// demote the first gate's live `in_flight` operations, so it is refused
+/// while the first one holds the database. Reading and reconciling are not.
+#[test]
+fn a_second_gate_on_a_live_database_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut live = open(dir.path());
+    assert!(live.recover().unwrap().is_empty());
+    live.begin("op-1", "crm.patch", &DIGEST).unwrap();
+
+    let mut second = open(dir.path());
+    let err = second.recover().expect_err("the database belongs to a running gate");
+    assert!(err.to_string().contains("another gate"), "{err}");
+    assert_eq!(second.get("op-1").unwrap().unwrap().state, OperationState::InFlight, "nothing was demoted");
+    // `operations list` / `reconcile` style access still works.
+    assert_eq!(second.list(None).unwrap().len(), 1);
+
+    // Once the live gate is gone, the next one takes over and sweeps.
+    drop(live);
+    assert_eq!(second.recover().unwrap(), vec!["op-1".to_string()]);
+}
+
+/// The gate gives the database up when it stops.
+#[test]
+fn a_released_database_can_be_taken_by_the_next_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut first = open(dir.path());
+    first.recover().unwrap();
+    first.release_gate();
+    let mut second = open(dir.path());
+    assert!(second.recover().is_ok());
+}

@@ -359,3 +359,26 @@ fn operations_commands_refuse_bad_input() {
     assert_eq!(code, 2, "{err}");
     assert!(!w.path().join("missing.db").exists());
 }
+
+/// A second proxy on an operations database a running gate holds refuses to
+/// start (exit 2); `operations list` and `reconcile` still work.
+#[test]
+fn a_second_gate_on_a_live_operations_db_refuses_to_start() {
+    let w = world(false);
+    let db = w.ops_db();
+    let mut live = cloakpipe_mcp::operations::OperationStore::open(&db).unwrap();
+    live.recover().unwrap();
+    live.begin("op-live", "crm.patch", &[3; 32]).unwrap();
+    live.begin("op-lost", "crm.patch", &[4; 32]).unwrap();
+    live.settle("op-lost", cloakpipe_mcp::operations::OperationState::Unknown, None).unwrap();
+
+    let r = w.run(false, &[call(1)]);
+    assert_eq!(r.code, 2, "{}", r.err);
+    assert!(r.err.contains("another gate"), "{}", r.err);
+    assert_eq!(effects(w.path()), 0, "the upstream never ran");
+    assert_eq!(live.get("op-live").unwrap().unwrap().state, cloakpipe_mcp::operations::OperationState::InFlight);
+
+    assert_eq!(w.list(&[]).len(), 2);
+    run_ok(w.path(), &["operations", "reconcile", "op-lost", "--outcome", "not-applied", "--operations-db", &db]);
+    assert_eq!(w.list(&["--state", "not_applied"]).len(), 1);
+}
