@@ -518,8 +518,8 @@ fn held_tool(dir: &Path) -> Vec<String> {
 }
 
 /// The upstream goes away after an operator already reconciled the call:
-/// the exit sweep changes nothing, so it neither records `unknown` nor tells
-/// the agent the outcome is unknown.
+/// the exit sweep changes nothing and records no `unknown`, but the request
+/// is still answered, with `operation_reconciled` and the reconciled state.
 #[test]
 fn the_exit_sweep_leaves_an_operation_reconciled_meanwhile_alone() {
     let dir = tempfile::tempdir().unwrap();
@@ -545,6 +545,12 @@ fn the_exit_sweep_leaves_an_operation_reconciled_meanwhile_alone() {
     assert_eq!(state(dir.path(), &op), OperationState::Done);
     let msgs = out.messages();
     assert!(msgs.iter().all(|m| m["error"]["data"]["reason"] != "operation_unknown"), "{msgs:?}");
+    // The request is still answered: an MCP client must never wait forever.
+    let a = answer(&msgs, 1);
+    assert_eq!(a["error"]["code"], -32002, "{a}");
+    assert_eq!(a["error"]["data"]["reason"], "operation_reconciled", "{a}");
+    assert_eq!(a["error"]["data"]["operationId"], op.as_str(), "{a}");
+    assert_eq!(a["error"]["data"]["state"], "done", "{a}");
     let records = ledger(&ledger_db);
     let states: Vec<_> = records
         .iter()

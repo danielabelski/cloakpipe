@@ -385,32 +385,43 @@ where
         Err(_) => Vec::new(),
     };
     for (request, operation_id) in abandoned {
-        // Only a row this sweep changed is evidence of `unknown`: an
-        // operation an operator reconciled meanwhile keeps its verdict, and
-        // the agent is not told otherwise. A row the store could not write
-        // stays in flight (a restart sweeps and records it); its outcome is
-        // still unknown to the agent.
+        // Only a row this sweep changed is evidence of `unknown`. An
+        // operation an operator reconciled meanwhile keeps its verdict and
+        // gets no `unknown` hop, but its request is still answered (an MCP
+        // client must never wait forever), with the reconciled state. A row
+        // the store could not write stays in flight (a restart sweeps and
+        // records it); its outcome is still unknown to the agent.
         let swept = match operations.as_ref().map(|s| s.lock()) {
-            Some(Ok(mut s)) => s.settle(&operation_id, OperationState::Unknown, None).map_err(|e| e.to_string()),
+            Some(Ok(mut s)) => match s.settle(&operation_id, OperationState::Unknown, None) {
+                Ok(true) => Ok(None),
+                Ok(false) => s.get(&operation_id).map(|row| row.map(|r| r.state)).map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            },
             _ => Err("lock poisoned".to_string()),
         };
-        match swept {
-            Ok(false) => {
-                tracing::info!("operations store: {operation_id} was settled or reconciled meanwhile; left as is");
-                continue;
+        let (reason, message, state) = match swept {
+            Ok(Some(state)) => {
+                tracing::info!("operations store: {operation_id} was reconciled meanwhile ({state}); left as is");
+                ("operation_reconciled", format!("the tool server went away before answering; an operator reconciled this call as {state}"), Some(state))
             }
-            Ok(true) => record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Passthrough, &operation_meta(OperationState::Unknown, &operation_id)),
-            Err(e) => tracing::warn!("operations store: could not mark {operation_id} unknown ({e}); a restart will"),
-        }
+            Ok(None) => {
+                record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Passthrough, &operation_meta(OperationState::Unknown, &operation_id));
+                ("operation_unknown", "the tool server went away before answering: the outcome of this call is unknown".to_string(), None)
+            }
+            Err(e) => {
+                tracing::warn!("operations store: could not mark {operation_id} unknown ({e}); a restart will");
+                ("operation_unknown", "the tool server went away before answering: the outcome of this call is unknown".to_string(), None)
+            }
+        };
         let id: Value = serde_json::from_str(&request).unwrap_or(Value::Null);
+        let mut data = serde_json::json!({ "reason": reason, "operationId": operation_id });
+        if let Some(state) = state {
+            data["state"] = Value::String(state.as_str().to_string());
+        }
         let notice = serde_json::json!({
             "jsonrpc": "2.0",
             "id": id,
-            "error": {
-                "code": RECONCILE_REQUIRED,
-                "message": "the tool server went away before answering: the outcome of this call is unknown",
-                "data": { "reason": "operation_unknown", "operationId": operation_id },
-            },
+            "error": { "code": RECONCILE_REQUIRED, "message": message, "data": data },
         });
         let _ = write_line(&agent_out, &notice.to_string());
     }
