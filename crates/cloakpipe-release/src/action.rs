@@ -19,6 +19,9 @@ use sha2::{Digest, Sha256};
 /// Domain separator of the tool-call fingerprint.
 pub const TOOL_CALL_FINGERPRINT_DOMAIN: &str = namespace::TOOL_CALL_FINGERPRINT_DOMAIN;
 
+/// Domain separator of a derived operation id.
+pub const OPERATION_ID_DOMAIN: &str = namespace::OPERATION_ID_DOMAIN;
+
 /// A tool-call fingerprint. Displays as `sha256:<hex>`; parses from that or
 /// from bare lowercase hex.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -57,4 +60,20 @@ pub fn fingerprint(release: &ReleaseHash, tool: &str, arguments: &Value) -> Tool
     // A `serde_json::Value` holds only finite numbers, which RFC 8785 encodes.
     h.update(serde_json_canonicalizer::to_vec(&call).expect("a JSON value encodes"));
     ToolCallFingerprint(h.finalize().into())
+}
+
+/// The operation id of a side-effecting call that has no approval receipt
+/// (a receipt's `operationId` is used when there is one): `op-` + the first
+/// 32 hex digits of `SHA-256(domain || "\n" || task_id || "\n" ||
+/// fingerprint hex)`, where `domain` is [`OPERATION_ID_DOMAIN`]. The same
+/// call in the same task is the same operation; the model never supplies it.
+pub fn derive_operation_id(task_id: &str, fingerprint: &ToolCallFingerprint) -> String {
+    let mut h = Sha256::new();
+    h.update(OPERATION_ID_DOMAIN.as_bytes());
+    h.update(b"\n");
+    h.update(task_id.as_bytes());
+    h.update(b"\n");
+    h.update(fingerprint.hex().as_bytes());
+    let digest = hex::encode(h.finalize());
+    format!("op-{}", &digest[..32])
 }

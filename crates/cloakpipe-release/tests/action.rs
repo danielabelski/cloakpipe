@@ -66,3 +66,28 @@ fn fingerprints_parse_from_their_display_and_bare_hex() {
     assert!("sha256:XYZ".parse::<ToolCallFingerprint>().is_err());
     assert!(fp.hex().to_uppercase().parse::<ToolCallFingerprint>().is_err());
 }
+
+// ── derived operation ids ───────────────────────────────────────────────
+
+#[test]
+fn a_derived_operation_id_is_op_plus_32_hex_of_the_domain_task_and_fingerprint() {
+    use cloakpipe_release::action::{derive_operation_id, OPERATION_ID_DOMAIN};
+    assert_eq!(OPERATION_ID_DOMAIN, "cloakpipe.co/operation/v1");
+    let fp = fingerprint(&release(), "crm.patch", &json!({"stage": "review"}));
+    let expected = hex::encode(Sha256::digest(format!("cloakpipe.co/operation/v1\nt-981\n{}", fp.hex()).as_bytes()));
+    let id = derive_operation_id("t-981", &fp);
+    assert_eq!(id, format!("op-{}", &expected[..32]));
+    assert_eq!(id.len(), 35);
+}
+
+#[test]
+fn the_same_call_in_another_task_is_another_operation() {
+    use cloakpipe_release::action::derive_operation_id;
+    let fp = fingerprint(&release(), "crm.patch", &json!({"stage": "review"}));
+    let other = fingerprint(&release(), "crm.patch", &json!({"stage": "qualified"}));
+    assert_eq!(derive_operation_id("t-981", &fp), derive_operation_id("t-981", &fp));
+    assert_ne!(derive_operation_id("t-981", &fp), derive_operation_id("t-982", &fp));
+    assert_ne!(derive_operation_id("t-981", &fp), derive_operation_id("t-981", &other));
+    // The fingerprint is fixed-length hex, so the input splits one way only.
+    assert_ne!(derive_operation_id("t-9\n", &fp), derive_operation_id("t-9", &fp));
+}
