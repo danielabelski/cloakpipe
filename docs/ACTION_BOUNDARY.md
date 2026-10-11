@@ -341,7 +341,9 @@ Before forwarding, the gate decides in one `BEGIN IMMEDIATE` transaction:
 
 The JSON-RPC request id maps the reply to its operation: a `result` without
 `isError: true` settles it `done` (the result is stored); `isError: true` or a
-JSON-RPC `error` settles it `failed`. When the upstream exits or its pipe
+JSON-RPC `error` settles it `failed`. A reply to an operation that is no
+longer `in_flight` (an operator reconciled it meanwhile) changes nothing and
+records no `operation_state`. When the upstream exits or its pipe
 breaks with operations still `in_flight`, they become `unknown` and each
 waiting request gets a `-32002` error with reason `operation_unknown` and its
 `operationId`. When a proxy starts, any row a previous process left

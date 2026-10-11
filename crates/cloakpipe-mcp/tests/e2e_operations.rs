@@ -462,6 +462,43 @@ fn warn_mode_tracks_a_side_effecting_call_that_fails_the_gate() {
     assert_eq!(meta(forwarded, "operation_id"), Some(op.as_str()), "{records:?}");
 }
 
+/// A reply to an operation that is no longer in flight (an operator
+/// reconciled it meanwhile) changes nothing, and the ledger does not claim
+/// it settled.
+#[test]
+fn a_reply_to_an_operation_reconciled_meanwhile_records_no_settlement() {
+    let dir = tempfile::tempdir().unwrap();
+    let op = op_id(&args());
+    let ledger_db = dir.path().join("ledger.db");
+    let (mut agent, proxy_side) = UnixStream::pair().unwrap();
+    let out = Capture::default();
+    let context = ctx(gate(dir.path(), task()), &ledger_db);
+    let (writer, reader, upstream) = (out.clone(), proxy_side.try_clone().unwrap(), slow_tool(dir.path(), false));
+    let handle = std::thread::spawn(move || run_proxy_io(upstream, context, reader, writer).unwrap());
+    agent.write_all(format!("{}\n", call(1, &args())).as_bytes()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while effects(dir.path()) == 0 {
+        assert!(Instant::now() < deadline, "the call never reached the tool");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    // The operator decides it did not happen while the reply is still due.
+    let mut store = OperationStore::open(dir.path().join("ops.db")).unwrap();
+    reconcile_operation(&mut store, &op, OperationState::NotApplied, ledger_db.to_str(), None).unwrap();
+    drop(store);
+    agent.shutdown(std::net::Shutdown::Write).unwrap();
+    drop(proxy_side);
+    handle.join().unwrap();
+    assert!(answer(&out.messages(), 1).get("result").is_some(), "{:?}", out.messages());
+    assert_eq!(state(dir.path(), &op), OperationState::NotApplied);
+    let records = ledger(&ledger_db);
+    let states: Vec<_> = records
+        .iter()
+        .filter(|r| meta(r, "operation_id") == Some(op.as_str()))
+        .filter_map(|r| meta(r, "operation_state").map(|s| (r.hop, s.to_string())))
+        .collect();
+    assert_eq!(states, [(Hop::OperationReconciled, "not_applied".to_string())], "{records:?}");
+}
+
 /// A side-effecting call may not reuse the id of another request still
 /// waiting for its reply either.
 #[test]

@@ -481,7 +481,8 @@ fn replayed(stored: Option<&str>, operation_id: &str, vault: &Mutex<Vault>) -> O
 /// Settle the operation an upstream reply answers: a `result` without
 /// `isError: true` is `done` (its masked result stored for replay); an
 /// error result or a JSON-RPC `error` is `failed`. Returns the operation and
-/// its new state, or `None` when the message answers no side-effecting call.
+/// its new state, or `None` when the message answers no side-effecting call
+/// or the store did not settle it (no longer `in_flight`, or unwritable).
 /// Only a reply settles: a request or notification from the upstream
 /// (`method`), or a message with neither `result` nor `error`, never does,
 /// whatever its id.
@@ -509,15 +510,28 @@ fn settle_reply(operations: &SharedOperations, pending: &Pending, msg: &Value) -
     } else {
         (OperationState::Failed, None)
     };
-    match store.lock() {
-        Ok(mut s) => {
-            if let Err(e) = s.settle(&operation_id, state, stored.as_deref()) {
-                tracing::warn!("operations store: could not settle {operation_id} ({e}); a restart marks it unknown");
+    // Evidence of a settlement only when the store row did change: an
+    // operation an operator reconciled meanwhile (or another process swept)
+    // keeps its state, and the ledger must not claim otherwise.
+    let settled = match store.lock() {
+        Ok(mut s) => match s.settle(&operation_id, state, stored.as_deref()) {
+            Ok(changed) => {
+                if !changed {
+                    tracing::warn!("operations store: {operation_id} is no longer in flight; its reply settles nothing");
+                }
+                changed
             }
+            Err(e) => {
+                tracing::warn!("operations store: could not settle {operation_id} ({e}); a restart marks it unknown");
+                false
+            }
+        },
+        Err(_) => {
+            tracing::warn!("operations store: lock poisoned; {operation_id} not settled");
+            false
         }
-        Err(_) => tracing::warn!("operations store: lock poisoned; {operation_id} not settled"),
-    }
-    Some((operation_id, state))
+    };
+    settled.then_some((operation_id, state))
 }
 
 /// Ledger metadata naming an operation and its state.
