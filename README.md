@@ -130,7 +130,8 @@ cargo build --release -p cloakpipe-cli -p cloakpipe-verify   # binaries in targe
 ```
 
 A container image of the **privacy proxy** is published to GHCR on every tag
-(currently `v0.10.0`, which predates the agent-release commands):
+(currently `v0.11.0`; the image ships the full `cloakpipe` CLI, so the
+release, certification and gate commands are in it too):
 
 ```bash
 docker run -p 8900:8900 -e OPENAI_API_KEY=sk-... ghcr.io/rohansx/cloakpipe:latest

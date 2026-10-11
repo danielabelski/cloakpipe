@@ -9,6 +9,8 @@ may contain breaking changes; these are marked **Breaking**.
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-12
+
 ### Added
 
 - **Tool contracts (action boundary).** A new `kind: ToolContract` artifact
@@ -303,7 +305,8 @@ may contain breaking changes; these are marked **Breaking**.
 
 - First release: privacy middleware for LLM and RAG pipelines.
 
-[Unreleased]: https://github.com/rohansx/cloakpipe/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/rohansx/cloakpipe/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/rohansx/cloakpipe/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/rohansx/cloakpipe/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/rohansx/cloakpipe/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/rohansx/cloakpipe/compare/v0.7.0...v0.8.0

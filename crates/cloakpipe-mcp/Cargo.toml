@@ -7,10 +7,10 @@ repository.workspace = true
 description = "MCP server for CloakPipe — expose privacy tools to AI agents"
 
 [dependencies]
-cloakpipe-core = { path = "../cloakpipe-core", version = "0.10.0" }
-cloakpipe-ledger = { path = "../cloakpipe-ledger", version = "0.10.0" }
-cloakpipe-release = { path = "../cloakpipe-release", version = "0.10.0" }
-cloakpipe-cert = { path = "../cloakpipe-cert", version = "0.10.0" }
+cloakpipe-core = { path = "../cloakpipe-core", version = "0.11.0" }
+cloakpipe-ledger = { path = "../cloakpipe-ledger", version = "0.11.0" }
+cloakpipe-release = { path = "../cloakpipe-release", version = "0.11.0" }
+cloakpipe-cert = { path = "../cloakpipe-cert", version = "0.11.0" }
 base64 = "0.23"
 chrono = { workspace = true }
 rmcp = { workspace = true }
