@@ -8,6 +8,7 @@
 //! and rehydrating results.
 
 pub mod gate;
+pub mod operations;
 pub mod proxy;
 pub use gate::{ApprovedCall, Authorization, Denial, GateConfigError, GateMode, ToolGate};
 pub use proxy::{run_proxy, run_proxy_io, stable_ids, ProxyContext};

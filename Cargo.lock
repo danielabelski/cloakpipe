@@ -635,6 +635,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "rmcp",
+ "rusqlite",
  "serde",
  "serde_json",
  "sha2",
