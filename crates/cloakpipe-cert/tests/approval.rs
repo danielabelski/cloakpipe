@@ -244,6 +244,16 @@ fn operation_ids_are_short_opaque_tokens() {
     }
 }
 
+/// An operation id is recorded in the evidence ledger, which refuses opaque
+/// ids that look like PII: such an id must be refused up front, not lost later.
+#[test]
+fn operation_ids_with_ledger_pii_markers_are_refused() {
+    for bad in ["japan-1", "lessn-2", "phone-op", "EMAIL.x", "aadhaar1", "ifsc:9", "gstin_2", "Pan", "op-SSN"] {
+        assert!(!is_valid_operation_id(bad), "{bad:?}");
+    }
+    assert!(is_valid_operation_id("op-crm-7"));
+}
+
 #[test]
 fn arguments_with_duplicate_keys_are_refused() {
     use cloakpipe_cert::approval::parse_json_strict;

@@ -195,7 +195,9 @@ receipt path, the fingerprint, the receipt digest (`sha256` of the file
 bytes), the operation id, the approver and `notAfter`. `--expires` takes
 `<n>s`, `<n>m`, `<n>h` or `<n>d` (default `15m`). `--operation-id` defaults
 to a fresh UUID v4; an explicit one is 1 to 128 ASCII letters, digits, `-`,
-`_`, `.` or `:`. The tool must be declared by the release, the arguments must
+`_`, `.` or `:`, and must not contain (in any case) `aadhaar`, `pan`,
+`ifsc`, `gstin`, `ssn`, `phone` or `email`: the evidence ledger refuses
+those in an opaque id, so the operation's hops could not be recorded. The tool must be declared by the release, the arguments must
 be JSON without duplicate keys, and the task context must carry a string
 `taskId`.
 

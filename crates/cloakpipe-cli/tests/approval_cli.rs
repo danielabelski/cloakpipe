@@ -311,6 +311,8 @@ fn approve_takes_an_explicit_operation_id_and_refuses_bad_input() {
         ([base("crm.patch", ctx.clone()), vec!["--expires".into(), "soon".into()]].concat(), 2),
         ([base("crm.patch", ctx.clone()), vec!["--expires".into(), "0m".into()]].concat(), 2),
         ([base("crm.patch", ctx.clone()), vec!["--operation-id".into(), "op 1".into()]].concat(), 2),
+        // The ledger would refuse it as PII-shaped: refused up front.
+        ([base("crm.patch", ctx.clone()), vec!["--operation-id".into(), "japan-1".into()]].concat(), 2),
         ([base("crm.patch", ctx.clone()), vec!["--key".into(), w.trust.replace("key.json", "missing.json")]].concat(), 2),
     ];
     for (a, expected) in cases {

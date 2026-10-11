@@ -7,7 +7,7 @@
 use crate::cert::{invalid, now_arg, read, rfc3339, signing_key, usage, Res};
 use crate::release::{load_valid, EXIT_OK};
 use clap::{Args, Subcommand};
-use cloakpipe_cert::approval::{is_valid_operation_id, parse_json_strict, sign_approval, Approval};
+use cloakpipe_cert::approval::{is_valid_operation_id, OPERATION_ID_FORBIDDEN, parse_json_strict, sign_approval, Approval};
 use cloakpipe_release::action::{fingerprint, ToolCallFingerprint};
 use cloakpipe_release::{AgentRelease, Reference};
 use serde_json::{json, Value};
@@ -110,7 +110,9 @@ fn approve_inner(a: &ApproveArgs) -> Res<i32> {
         Some(id) if is_valid_operation_id(id) => id.clone(),
         Some(id) => {
             return Err(usage(format_args!(
-                "--operation-id {id:?}: expected 1-128 ASCII letters, digits, '-', '_', '.' or ':'"
+                "--operation-id {id:?}: expected 1-128 ASCII letters, digits, '-', '_', '.' or ':', \
+                 without the evidence ledger's PII markers ({})",
+                OPERATION_ID_FORBIDDEN.join(", ")
             )))
         }
         None => uuid::Uuid::new_v4().to_string(),

@@ -200,3 +200,26 @@ fn state_names_are_stable() {
     }
     assert!("in-flight".parse::<OperationState>().is_err());
 }
+
+/// Every id `cloakpipe approve --operation-id` and the gate accept is one
+/// the evidence ledger accepts as an `operation_id`, so its hops are never lost.
+#[test]
+fn every_valid_operation_id_is_a_ledger_opaque_id() {
+    use cloakpipe_cert::approval::is_valid_operation_id;
+    use cloakpipe_ledger::{MetadataValue, RecordBuilder};
+    let ledger_ok =
+        |id: &str| RecordBuilder::new().metadata("operation_id", MetadataValue::OpaqueId(id.to_string())).build().is_ok();
+    let words = ["op", "japan", "lessn", "phone", "EMAIL", "aadhaar", "ifsc", "gstin", "Pan", "SSN", "crm", "x"];
+    let seps = ["", "-", "_", ".", ":", "1"];
+    for a in words {
+        for sep in seps {
+            for b in words {
+                let id = format!("{a}{sep}{b}");
+                if is_valid_operation_id(&id) {
+                    assert!(ledger_ok(&id), "{id:?} passes is_valid_operation_id but the ledger refuses it");
+                }
+            }
+        }
+    }
+    assert!(ledger_ok(&uuid::Uuid::new_v4().to_string()));
+}

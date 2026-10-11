@@ -109,10 +109,19 @@ impl std::fmt::Display for ApprovalError {
 
 impl std::error::Error for ApprovalError {}
 
-/// An operation id: 1 to 128 ASCII letters, digits, `-`, `_`, `.` or `:`.
-/// Short and opaque, so it can be recorded in the evidence ledger.
+/// Substrings the evidence ledger refuses in an opaque id (ASCII
+/// case-insensitive), because they look like PII. Mirrors the ledger's
+/// opaque-id check for the characters an operation id may contain.
+pub const OPERATION_ID_FORBIDDEN: [&str; 7] = ["aadhaar", "pan", "ifsc", "gstin", "ssn", "phone", "email"];
+
+/// An operation id: 1 to 128 ASCII letters, digits, `-`, `_`, `.` or `:`,
+/// containing none of [`OPERATION_ID_FORBIDDEN`] in any case. Short and
+/// opaque, so the evidence ledger accepts it as an `operation_id`.
 pub fn is_valid_operation_id(id: &str) -> bool {
-    (1..=128).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+    let lowered = id.to_ascii_lowercase();
+    (1..=128).contains(&id.len())
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+        && !OPERATION_ID_FORBIDDEN.iter().any(|m| lowered.contains(m))
 }
 
 /// Parse JSON (tool-call arguments, a task context) refusing duplicate
