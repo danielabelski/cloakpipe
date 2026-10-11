@@ -254,14 +254,32 @@ rules:
 defaults to `1.0` and `minAllowRate` to `0.9`. List every suite whose
 boundary the release must hold (for example `[authorization,
 access_control, side_effect]`); each listed suite needs a run that covers
-it. For each listed suite, the labelled cases of all candidate runs that
-cover it are pooled:
+it.
+
+**Each covering run is evaluated on its own.** For each listed suite,
+every candidate run that covers it is checked against its own labelled
+cases; cases of different runs are never pooled. A clean run therefore
+cannot dilute a failing one (90 of 90 allow cases completed in one run do
+not hide 5 of 10 in another), and deny cases in one run and allow cases in
+another do not make either run complete. Every covering run must meet both
+minimums and have both kinds of case:
 
 | Reason | When |
 |---|---|
-| `under_blocking` | deny rate = passed deny cases / deny cases < `minDenyRate` (a forbidden action went through) |
-| `over_refusal` | allow rate = passed allow cases / allow cases < `minAllowRate` (legitimate work was refused) |
-| `boundary_incomplete` | no run covers the suite, or it has no labelled case, no deny case, or no allow case |
+| `under_blocking` | a covering run's deny rate = passed deny cases / deny cases < `minDenyRate` (a forbidden action went through) |
+| `over_refusal` | a covering run's allow rate = passed allow cases / allow cases < `minAllowRate` (legitimate work was refused) |
+| `boundary_incomplete` | no run covers the suite, or a covering run has no labelled case, no deny case, or no allow case |
+
+Each reason carries the suite (`suite`) and names the run in its message
+(`run "<runId>": boundary suite "<suite>": …`); a suite that fails in two
+runs gives one reason per run. Rates in the message are rounded to at most
+4 decimal places (`0.6667` for 2/3); `observed` and `required` keep the
+exact values.
+
+Case ids are unique within a run: a run with a duplicate case id is
+invalid (`invalid_input`) and is not evaluated at all, so a case can never
+be counted twice. The same case id in two different runs is two cases,
+each counted only in its own run's rates.
 
 A skipped, failed or errored labelled case is not passed. Unlabelled cases
 are ignored by this check (they still count for pass rate and coverage). A
@@ -272,6 +290,14 @@ every reason, these appear in the `certify` output and in the signed
 decision (`predicate.certification.decision.reasons[].code`, with
 `observed`/`required` rates). A policy without `boundary` and runs without
 labels hash and decide exactly as before.
+
+**Enabling `rules.boundary` requires labelling.** Adding `boundary` to a
+policy blocks every release whose covering runs for the listed suites are
+not labelled: runs imported before labels were added (or from a harness
+that does not emit `cloakpipe.expect`) have no labelled case and fail with
+`boundary_incomplete`. Label every case of the listed suites and re-import
+the runs before turning the rule on, or list only suites whose runs are
+already labelled.
 
 Labels come from the JUnit property `cloakpipe.expect`, the native JSON
 case field `expect`, and `metadata["cloakpipe.expect"]` on Braintrust events
@@ -299,7 +325,7 @@ cloakpipe eval import --junit authz.xml --release release.yaml \
 cloakpipe release certify release.yaml --policy policy.yaml --run authz-run.json \
   --require authorization --environment production --issuer ci:acme/support --key key.json
 # BLOCKED ...
-#   - over_refusal [authorization]: boundary suite "authorization": allow rate 0 (0/3 allow cases completed) is below the minimum 0.9
+#   - over_refusal [authorization]: run "authz@1": boundary suite "authorization": allow rate 0 (0/3 allow cases completed) is below the minimum 0.9
 ```
 
 ### `cloakpipe release verify-cert`

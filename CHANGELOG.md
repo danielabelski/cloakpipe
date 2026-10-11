@@ -45,9 +45,11 @@ may contain breaking changes; these are marked **Breaking**.
   `rules.boundary` stops a release passing authorization by refusing
   everything: cases labelled `expect: allow|deny` (JUnit property
   `cloakpipe.expect`, native JSON `expect`, Braintrust/Langfuse metadata
-  `cloakpipe.expect`) are scored both ways per listed suite, and the release
-  is blocked with `under_blocking`, `over_refusal` or `boundary_incomplete`.
-  Policies and runs without these fields keep their hashes. See
+  `cloakpipe.expect`) are scored both ways in every run that covers a listed
+  suite (each run on its own, never pooled), and the release is blocked
+  with `under_blocking`, `over_refusal` or `boundary_incomplete`. Enabling
+  the rule requires labelled runs. Policies and runs without these fields
+  keep their hashes. See
   `docs/CERTIFICATION.md#two-way-boundary`.
 - **MCP tool gate.** `cloakpipe mcp-proxy --manifest ... --certification ...`
   only forwards a `tools/call` when the tool is declared in the release manifest
