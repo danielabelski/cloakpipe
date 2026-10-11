@@ -6,9 +6,9 @@
 //! `GET /api/public/experiment-items?fields=core,dataset,scores`, whose
 //! `scores` are the item's own and its trace's scores (`ScoreV3`).
 
-use super::scores::{CaseScores, ScoreRules, J};
+use super::scores::{metadata_expect, CaseScores, ScoreRules, J};
 use super::{build_run, ImportError, ImportMeta};
-use crate::model::{EvaluationRun, SourceKind};
+use crate::model::{CaseResult, EvaluationRun, Expect, SourceKind};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Langfuse's maximum (and default) `scoreLimit`: an item listing this many
@@ -58,7 +58,7 @@ pub fn from_langfuse_experiment(
     let mut seen = BTreeSet::new();
     let mut cases = Vec::with_capacity(items.len());
     for (label, item) in items {
-        let Some((case_id, error, scores)) = read_item(&label, item, &experiment.id, &mut issues) else {
+        let Some((case_id, error, expect, scores)) = read_item(&label, item, &experiment.id, &mut issues) else {
             continue;
         };
         if !seen.insert(case_id.clone()) {
@@ -81,7 +81,7 @@ pub fn from_langfuse_experiment(
             }
         }
         let critical = meta.is_critical(&case_id);
-        cases.push(case.into_case(case_id, critical, error, rules, BTreeMap::new(), None));
+        cases.push(CaseResult { expect, ..case.into_case(case_id, critical, error, rules, BTreeMap::new(), None) });
     }
 
     let dataset = meta.dataset.clone().or(experiment.dataset_id);
@@ -231,10 +231,13 @@ fn item_objects<'a>(doc: &'a J, issues: &mut Vec<String>) -> Vec<(String, &'a J)
     out
 }
 
-/// An item's case id, whether it is an error, and its scores; `None` (with
-/// an issue) if it cannot be read.
-fn read_item<'a>(label: &str, item: &'a J, experiment_id: &str, issues: &mut Vec<String>) -> Option<(String, bool, &'a [J])> {
-    let read = || -> Result<(String, bool, &'a [J]), String> {
+/// An item's case id, whether it is an error, its boundary label
+/// (`metadata["cloakpipe.expect"]`) and its scores; `None` (with an issue)
+/// if it cannot be read.
+type Item<'a> = (String, bool, Option<Expect>, &'a [J]);
+
+fn read_item<'a>(label: &str, item: &'a J, experiment_id: &str, issues: &mut Vec<String>) -> Option<Item<'a>> {
+    let read = || -> Result<Item<'a>, String> {
         if !matches!(item, J::Obj(_)) {
             return Err(format!("expected an experiment item object, found {}", item.kind()));
         }
@@ -260,7 +263,8 @@ fn read_item<'a>(label: &str, item: &'a J, experiment_id: &str, issues: &mut Vec
             Some(J::Arr(scores)) => scores,
             Some(other) => return Err(format!("scores: expected an array or null, found {}", other.kind())),
         };
-        Ok((case_id, error, scores))
+        let expect = metadata_expect(item.get("metadata")?)?;
+        Ok((case_id, error, expect, scores))
     };
     read().map_err(|e| issues.push(format!("{label}: {e}"))).ok()
 }
