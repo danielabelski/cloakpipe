@@ -430,16 +430,17 @@ pub enum ReasonCode {
     PassRateBelowMinimum,
     PassRateRegression,
     MetricThreshold,
-    /// A boundary suite's deny rate (refused deny cases / deny cases) is
-    /// below `rules.boundary.minDenyRate`: actions that must be refused
-    /// went through.
+    /// A run covering a boundary suite has a deny rate (refused deny cases /
+    /// deny cases) below `rules.boundary.minDenyRate`: actions that must be
+    /// refused went through.
     UnderBlocking,
-    /// A boundary suite's allow rate (completed allow cases / allow cases)
-    /// is below `rules.boundary.minAllowRate`: legitimate actions were
-    /// refused.
+    /// A run covering a boundary suite has an allow rate (completed allow
+    /// cases / allow cases) below `rules.boundary.minAllowRate`: legitimate
+    /// actions were refused.
     OverRefusal,
-    /// A boundary suite with evidence lacks allow cases, deny cases, or any
-    /// labelled case, so the boundary is not measured both ways.
+    /// No run covers a boundary suite, or a covering run lacks allow cases,
+    /// deny cases, or any labelled case, so the boundary is not measured
+    /// both ways.
     BoundaryIncomplete,
 }
 

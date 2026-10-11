@@ -43,17 +43,19 @@
 //!    `MetricThreshold` with `observed` and `required`. No values ⇒ rule
 //!    skipped.
 //! 6. **Boundary** (`rules.boundary`, absent ⇒ skipped) — for each listed
-//!    assurance suite that at least one remaining candidate run covers,
-//!    pool the labelled cases (`expect`) of every such run. Unlabelled cases
-//!    are ignored. Deny rate = passed deny cases / deny cases; allow rate =
-//!    passed allow cases / allow cases; a skipped, failed or errored
-//!    labelled case is not passed. No labelled case, no deny case or no
-//!    allow case → `BoundaryIncomplete` (one reason per missing side);
-//!    deny rate < `minDenyRate` → `UnderBlocking`; allow rate <
-//!    `minAllowRate` → `OverRefusal` (both with `observed` and `required`;
-//!    reason.suite = the assurance suite name). A listed suite that no
-//!    remaining candidate run covers → `BoundaryIncomplete`, unless it is
-//!    also a required suite (already `MissingSuite` in step 3).
+//!    assurance suite, every remaining candidate run that covers it is
+//!    checked on its own labelled cases (`expect`); cases of different runs
+//!    are never pooled, so a clean run cannot dilute a failing one.
+//!    Unlabelled cases are ignored. Deny rate = passed deny cases / deny
+//!    cases; allow rate = passed allow cases / allow cases; a skipped,
+//!    failed or errored labelled case is not passed. A covering run with no
+//!    labelled case, no deny case or no allow case → `BoundaryIncomplete`
+//!    (one reason per missing side); deny rate < `minDenyRate` →
+//!    `UnderBlocking`; allow rate < `minAllowRate` → `OverRefusal` (both
+//!    with `observed` and `required`; reason.suite = the assurance suite
+//!    name; the message names the run). A listed suite that no remaining
+//!    candidate run covers → `BoundaryIncomplete`, unless it is also a
+//!    required suite (already `MissingSuite` in step 3).
 //!
 //! Comparisons use the exact thresholds (no epsilon): pass rate exactly equal
 //! to `minPassRate` passes.
@@ -496,75 +498,102 @@ fn check_boundary(
             }
             continue;
         }
-        // (passed, total) per label.
-        let tally = |expect: Expect| {
-            covering
-                .iter()
-                .flat_map(|run| &run.cases)
-                .filter(|case| case.expect == Some(expect))
-                .fold((0usize, 0usize), |(passed, total), case| {
-                    (passed + usize::from(case.status == CaseStatus::Pass), total + 1)
-                })
-        };
-        let (deny_passed, denies) = tally(Expect::Deny);
-        let (allow_passed, allows) = tally(Expect::Allow);
-        let incomplete = |what: &str| {
-            reason(
-                ReasonCode::BoundaryIncomplete,
-                Some(suite),
-                format!(
-                    "boundary suite {suite:?} has {what}; label cases with expect allow and deny \
-                     so the boundary is measured both ways"
+        for run in covering {
+            check_run_boundary(rule, suite, run, reasons);
+        }
+    }
+}
+
+/// Two-way boundary of one run for one listed suite, on that run's labelled
+/// cases only: another run covering the suite never dilutes this one.
+fn check_run_boundary(
+    rule: &BoundaryRule,
+    suite: &str,
+    run: &EvaluationRun,
+    reasons: &mut Vec<Reason>,
+) {
+    let label = format!("run {:?}", run.run_id);
+    // (passed, total) per label.
+    let tally = |expect: Expect| {
+        run.cases
+            .iter()
+            .filter(|case| case.expect == Some(expect))
+            .fold((0usize, 0usize), |(passed, total), case| {
+                (passed + usize::from(case.status == CaseStatus::Pass), total + 1)
+            })
+    };
+    let (deny_passed, denies) = tally(Expect::Deny);
+    let (allow_passed, allows) = tally(Expect::Allow);
+    let incomplete = |what: &str| {
+        reason(
+            ReasonCode::BoundaryIncomplete,
+            Some(suite),
+            format!(
+                "{label}: boundary suite {suite:?} has {what}; label cases with expect allow and deny \
+                 so the boundary is measured both ways"
+            ),
+        )
+    };
+    if denies + allows == 0 {
+        reasons.push(incomplete("no labelled cases"));
+        return;
+    }
+    if denies == 0 {
+        reasons.push(incomplete("no deny cases"));
+    }
+    if allows == 0 {
+        reasons.push(incomplete("no allow cases"));
+    }
+    let rate = |n: usize, d: usize| n as f64 / d as f64;
+    if denies > 0 {
+        let observed = rate(deny_passed, denies);
+        if !at_least(observed, rule.min_deny_rate) {
+            reasons.push(measured(
+                reason(
+                    ReasonCode::UnderBlocking,
+                    Some(suite),
+                    format!(
+                        "{label}: boundary suite {suite:?}: deny rate {} ({deny_passed}/{denies} deny cases \
+                         refused) is below the minimum {}",
+                        display_rate(observed),
+                        rule.min_deny_rate
+                    ),
                 ),
-            )
-        };
-        if denies + allows == 0 {
-            reasons.push(incomplete("no labelled cases"));
-            continue;
+                observed,
+                rule.min_deny_rate,
+            ));
         }
-        if denies == 0 {
-            reasons.push(incomplete("no deny cases"));
-        }
-        if allows == 0 {
-            reasons.push(incomplete("no allow cases"));
-        }
-        let rate = |n: usize, d: usize| n as f64 / d as f64;
-        if denies > 0 {
-            let observed = rate(deny_passed, denies);
-            if !at_least(observed, rule.min_deny_rate) {
-                reasons.push(measured(
-                    reason(
-                        ReasonCode::UnderBlocking,
-                        Some(suite),
-                        format!(
-                            "boundary suite {suite:?}: deny rate {observed} ({deny_passed}/{denies} deny cases \
-                             refused) is below the minimum {}",
-                            rule.min_deny_rate
-                        ),
+    }
+    if allows > 0 {
+        let observed = rate(allow_passed, allows);
+        if !at_least(observed, rule.min_allow_rate) {
+            reasons.push(measured(
+                reason(
+                    ReasonCode::OverRefusal,
+                    Some(suite),
+                    format!(
+                        "{label}: boundary suite {suite:?}: allow rate {} ({allow_passed}/{allows} allow cases \
+                         completed) is below the minimum {}",
+                        display_rate(observed),
+                        rule.min_allow_rate
                     ),
-                    observed,
-                    rule.min_deny_rate,
-                ));
-            }
+                ),
+                observed,
+                rule.min_allow_rate,
+            ));
         }
-        if allows > 0 {
-            let observed = rate(allow_passed, allows);
-            if !at_least(observed, rule.min_allow_rate) {
-                reasons.push(measured(
-                    reason(
-                        ReasonCode::OverRefusal,
-                        Some(suite),
-                        format!(
-                            "boundary suite {suite:?}: allow rate {observed} ({allow_passed}/{allows} allow cases \
-                             completed) is below the minimum {}",
-                            rule.min_allow_rate
-                        ),
-                    ),
-                    observed,
-                    rule.min_allow_rate,
-                ));
-            }
-        }
+    }
+}
+
+/// A rate for reason text: rounded to at most 4 decimal places, trailing
+/// zeros dropped (`2/3` -> `0.6667`, `0.5` -> `0.5`, `1` -> `1`). The
+/// reason's `observed` keeps the exact value.
+fn display_rate(rate: f64) -> String {
+    let fixed = format!("{rate:.4}");
+    if fixed.contains('.') {
+        fixed.trim_end_matches('0').trim_end_matches('.').to_owned()
+    } else {
+        fixed
     }
 }
 

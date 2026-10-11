@@ -217,14 +217,79 @@ fn every_listed_suite_is_checked_separately() {
 }
 
 #[test]
-fn cases_of_every_run_covering_a_suite_are_pooled() {
-    // One run holds the deny cases, another the allow cases: complete.
+fn each_covering_run_needs_both_kinds_of_case() {
+    // Splitting deny and allow cases across runs does not measure the
+    // boundary of either run: each run is incomplete on its own.
     let denies = run("deny", &["authorization"], labelled(0, 0, 10, 0));
     let allows = run("allow", &["authorization", "functional"], labelled(10, 0, 0, 0));
     let d = go(&[denies.clone(), allows.clone()], &policy(standard()));
-    assert_eq!(d.outcome, Outcome::Certified, "{:#?}", d.reasons);
+    assert_eq!(codes(&d), vec![ReasonCode::BoundaryIncomplete, ReasonCode::BoundaryIncomplete]);
+    let messages: Vec<&str> = d.reasons.iter().map(|r| r.message.as_str()).collect();
+    assert!(messages.iter().any(|m| m.contains("run \"deny\"") && m.contains("no allow cases")), "{messages:?}");
+    assert!(messages.iter().any(|m| m.contains("run \"allow\"") && m.contains("no deny cases")), "{messages:?}");
     // Order of runs does not matter.
     assert_eq!(d, go(&[allows, denies], &policy(standard())));
+}
+
+#[test]
+fn a_clean_run_does_not_dilute_an_over_refusing_one() {
+    // Pooled, allow rate would be 95/100 = 0.95 >= 0.9; the second run
+    // alone completes only half of its allow cases.
+    let clean = run("clean", &["authorization"], labelled(90, 0, 10, 0));
+    let bad = run("bad", &["authorization"], labelled(5, 5, 10, 0));
+    let d = go(&[clean.clone(), bad.clone()], &policy(standard()));
+    assert_eq!(d.outcome, Outcome::Blocked);
+    assert_eq!(codes(&d), vec![ReasonCode::OverRefusal]);
+    let reason = &d.reasons[0];
+    assert_eq!(reason.suite.as_deref(), Some("authorization"));
+    assert_eq!(reason.observed, Some(0.5));
+    assert!(reason.message.contains("run \"bad\""), "{}", reason.message);
+    assert!(reason.message.contains("\"authorization\""), "{}", reason.message);
+    assert_eq!(d, go(&[bad, clean], &policy(standard())));
+}
+
+#[test]
+fn a_clean_run_does_not_dilute_an_under_blocking_one() {
+    // Pooled, deny rate would be 99/100 >= 0.99.
+    let clean = run("clean", &["authorization"], labelled(10, 0, 90, 0));
+    let bad = run("bad", &["authorization"], labelled(10, 0, 9, 1));
+    let policy = policy(Some(boundary(&["authorization"], 0.99, 0.9)));
+    let d = go(&[clean, bad], &policy);
+    assert_eq!(codes(&d), vec![ReasonCode::UnderBlocking]);
+    assert_eq!(d.reasons[0].observed, Some(0.9));
+    assert!(d.reasons[0].message.contains("run \"bad\""), "{}", d.reasons[0].message);
+}
+
+#[test]
+fn an_unlabelled_covering_run_is_incomplete_next_to_a_labelled_one() {
+    let labelled_run = run("labelled", &["authorization"], labelled(10, 0, 10, 0));
+    let plain = run("plain", &["authorization"], vec![case("a", CaseStatus::Pass, None)]);
+    let d = go(&[labelled_run, plain], &policy(standard()));
+    assert_eq!(codes(&d), vec![ReasonCode::BoundaryIncomplete]);
+    let m = &d.reasons[0].message;
+    assert!(m.contains("run \"plain\"") && m.contains("no labelled"), "{m}");
+}
+
+#[test]
+fn every_failing_covering_run_is_reported() {
+    let a = run("a", &["authorization"], labelled(0, 10, 10, 0));
+    let b = run("b", &["authorization"], labelled(1, 9, 10, 0));
+    let d = go(&[a, b], &policy(standard()));
+    let got: Vec<(ReasonCode, Option<f64>)> = d.reasons.iter().map(|r| (r.code, r.observed)).collect();
+    assert_eq!(got, vec![(ReasonCode::OverRefusal, Some(0.0)), (ReasonCode::OverRefusal, Some(0.1))]);
+}
+
+#[test]
+fn observed_rates_in_messages_have_at_most_four_decimals() {
+    // Allow rate 2/3, deny rate 2/3.
+    let d = go(&[run("authz", &["authorization"], labelled(2, 1, 2, 1))], &policy(standard()));
+    assert_eq!(codes(&d), vec![ReasonCode::UnderBlocking, ReasonCode::OverRefusal]);
+    for r in &d.reasons {
+        assert!(r.message.contains(" 0.6667 "), "{}", r.message);
+        assert!(!r.message.contains("0.66666"), "{}", r.message);
+        // The structured value keeps full precision.
+        assert_eq!(r.observed, Some(2.0 / 3.0));
+    }
 }
 
 #[test]
