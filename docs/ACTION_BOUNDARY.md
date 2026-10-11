@@ -353,7 +353,8 @@ longer `in_flight` (an operator reconciled it meanwhile) changes nothing and
 records no `operation_state`. When the upstream exits or its pipe
 breaks with operations still `in_flight`, they become `unknown` and each
 waiting request gets a `-32002` error with reason `operation_unknown` and its
-`operationId`. When a proxy starts, any row a previous process left
+`operationId`; an operation an operator already reconciled is left as it is
+(no `unknown` hop, no `operation_unknown` error). When a proxy starts, any row a previous process left
 `in_flight` (it crashed) becomes `unknown`. Operation tracking also applies
 with `--gate warn`, including to a call that fails the gate and is forwarded
 anyway (its id is a verifying receipt's `operationId`, else the derived id):

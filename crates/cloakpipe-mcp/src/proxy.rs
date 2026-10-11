@@ -385,14 +385,23 @@ where
         Err(_) => Vec::new(),
     };
     for (request, operation_id) in abandoned {
-        if let Some(store) = &operations {
-            if let Ok(mut s) = store.lock() {
-                if let Err(e) = s.settle(&operation_id, OperationState::Unknown, None) {
-                    tracing::warn!("operations store: could not mark {operation_id} unknown ({e}); a restart will");
-                }
+        // Only a row this sweep changed is evidence of `unknown`: an
+        // operation an operator reconciled meanwhile keeps its verdict, and
+        // the agent is not told otherwise. A row the store could not write
+        // stays in flight (a restart sweeps and records it); its outcome is
+        // still unknown to the agent.
+        let swept = match operations.as_ref().map(|s| s.lock()) {
+            Some(Ok(mut s)) => s.settle(&operation_id, OperationState::Unknown, None).map_err(|e| e.to_string()),
+            _ => Err("lock poisoned".to_string()),
+        };
+        match swept {
+            Ok(false) => {
+                tracing::info!("operations store: {operation_id} was settled or reconciled meanwhile; left as is");
+                continue;
             }
+            Ok(true) => record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Passthrough, &operation_meta(OperationState::Unknown, &operation_id)),
+            Err(e) => tracing::warn!("operations store: could not mark {operation_id} unknown ({e}); a restart will"),
         }
-        record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Passthrough, &operation_meta(OperationState::Unknown, &operation_id));
         let id: Value = serde_json::from_str(&request).unwrap_or(Value::Null);
         let notice = serde_json::json!({
             "jsonrpc": "2.0",

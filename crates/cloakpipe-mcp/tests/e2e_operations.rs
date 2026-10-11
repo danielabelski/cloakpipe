@@ -501,6 +501,59 @@ fn a_reply_to_an_operation_reconciled_meanwhile_records_no_settlement() {
     assert_eq!(states, [(Hop::OperationReconciled, "not_applied".to_string())], "{records:?}");
 }
 
+/// A tool that commits each call, then waits for `go` in `dir` and exits
+/// without replying (a lost acknowledgment the test controls the timing of).
+fn held_tool(dir: &Path) -> Vec<String> {
+    let script = dir.join(format!("held-{}.sh", uuid::Uuid::new_v4()));
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nwhile IFS= read -r line; do\n  printf '%s\\n' \"$line\" >> '{effects}'\n  while [ ! -e '{go}' ]; do sleep 0.05; done\n  exit 0\ndone\n",
+            effects = dir.join("effects.jsonl").display(),
+            go = dir.join("go").display()
+        ),
+    )
+    .unwrap();
+    vec!["sh".into(), script.to_string_lossy().into_owned()]
+}
+
+/// The upstream goes away after an operator already reconciled the call:
+/// the exit sweep changes nothing, so it neither records `unknown` nor tells
+/// the agent the outcome is unknown.
+#[test]
+fn the_exit_sweep_leaves_an_operation_reconciled_meanwhile_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let op = op_id(dir.path(), &args());
+    let ledger_db = dir.path().join("ledger.db");
+    let (mut agent, proxy_side) = UnixStream::pair().unwrap();
+    let out = Capture::default();
+    let context = ctx(gate(dir.path(), task()), &ledger_db);
+    let (writer, reader, upstream) = (out.clone(), proxy_side.try_clone().unwrap(), held_tool(dir.path()));
+    let handle = std::thread::spawn(move || run_proxy_io(upstream, context, reader, writer).unwrap());
+    agent.write_all(format!("{}\n", call(1, &args())).as_bytes()).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while effects(dir.path()) == 0 {
+        assert!(Instant::now() < deadline, "the call never reached the tool");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut store = OperationStore::open(dir.path().join("ops.db")).unwrap();
+    reconcile_operation(&mut store, &op, OperationState::Done, ledger_db.to_str(), None).unwrap();
+    drop(store);
+    std::fs::write(dir.path().join("go"), b"").unwrap();
+    handle.join().unwrap();
+    drop(proxy_side);
+    assert_eq!(state(dir.path(), &op), OperationState::Done);
+    let msgs = out.messages();
+    assert!(msgs.iter().all(|m| m["error"]["data"]["reason"] != "operation_unknown"), "{msgs:?}");
+    let records = ledger(&ledger_db);
+    let states: Vec<_> = records
+        .iter()
+        .filter(|r| meta(r, "operation_id") == Some(op.as_str()))
+        .filter_map(|r| meta(r, "operation_state").map(|s| (r.hop, s.to_string())))
+        .collect();
+    assert_eq!(states, [(Hop::OperationReconciled, "done".to_string())], "{records:?}");
+}
+
 /// A side-effecting call may not reuse the id of another request still
 /// waiting for its reply either.
 #[test]
