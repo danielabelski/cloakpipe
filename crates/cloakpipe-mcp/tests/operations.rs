@@ -223,3 +223,15 @@ fn every_valid_operation_id_is_a_ledger_opaque_id() {
     }
     assert!(ledger_ok(&uuid::Uuid::new_v4().to_string()));
 }
+
+/// Each operations database holds its own random key for deriving
+/// operation ids: stable across opens, different between databases.
+#[test]
+fn the_store_holds_a_stable_random_operation_id_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let other = tempfile::tempdir().unwrap();
+    let key = open(dir.path()).operation_id_key().unwrap();
+    assert_eq!(open(dir.path()).operation_id_key().unwrap(), key);
+    assert_ne!(open(other.path()).operation_id_key().unwrap(), key);
+    assert_ne!(key, [0u8; 32]);
+}

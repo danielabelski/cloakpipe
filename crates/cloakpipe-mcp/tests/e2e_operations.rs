@@ -214,9 +214,12 @@ fn args() -> Value {
     json!({"tenant": "demo-co", "record": "lead-42", "patch": {"stage": "qualified", "note": "called back"}})
 }
 
-fn op_id(arguments: &Value) -> String {
+/// The derived id of a call in the operations database in `dir` (keyed by
+/// that database's own key).
+fn op_id(dir: &Path, arguments: &Value) -> String {
     let m = release_binding(&contract(false));
-    derive_operation_id("t-981", &fingerprint(&m.manifest_hash(), "crm.patch", arguments))
+    let key = OperationStore::open(dir.join("ops.db")).unwrap().operation_id_key().unwrap();
+    derive_operation_id(&key, "t-981", &fingerprint(&m.manifest_hash(), "crm.patch", arguments))
 }
 
 fn ctx(gate: ToolGate, ledger_db: &Path) -> ProxyContext {
@@ -286,7 +289,7 @@ fn meta<'a>(r: &'a LedgerRecord, key: &str) -> Option<&'a str> {
 #[test]
 fn a_lost_acknowledgment_is_unknown_until_reconciled_and_never_re_executed() {
     let dir = tempfile::tempdir().unwrap();
-    let op = op_id(&args());
+    let op = op_id(dir.path(), &args());
 
     // 1. The tool commits the effect, then dies without replying.
     let msgs = run(dir.path(), Tool::LoseAck, gate(dir.path(), task()), &[call(1, &args())]);
@@ -350,7 +353,7 @@ fn a_lost_acknowledgment_is_unknown_until_reconciled_and_never_re_executed() {
 #[test]
 fn a_reconciled_not_applied_operation_runs_again() {
     let dir = tempfile::tempdir().unwrap();
-    let op = op_id(&args());
+    let op = op_id(dir.path(), &args());
     run(dir.path(), Tool::LoseAck, gate(dir.path(), task()), &[call(1, &args())]);
     let mut store = OperationStore::open(dir.path().join("ops.db")).unwrap();
     reconcile_operation(&mut store, &op, OperationState::NotApplied, None, None).unwrap();
@@ -379,8 +382,7 @@ fn a_done_operation_replays_its_stored_result_rehydrated() {
     assert!(first["result"].get("_meta").is_none(), "{first}");
 
     // The store holds the masked result only.
-    let m = release_binding(&contract(false));
-    let op = derive_operation_id("t-981", &fingerprint(&m.manifest_hash(), "crm.patch", &a));
+    let op = op_id(dir.path(), &a);
     let row = OperationStore::open(dir.path().join("ops.db")).unwrap().get(&op).unwrap().unwrap();
     assert_eq!(row.state, OperationState::Done);
     let stored = row.result.unwrap();
@@ -390,7 +392,7 @@ fn a_done_operation_replays_its_stored_result_rehydrated() {
 #[test]
 fn a_failed_operation_may_be_retried() {
     let dir = tempfile::tempdir().unwrap();
-    let op = op_id(&args());
+    let op = op_id(dir.path(), &args());
     let msgs = run_in_turn(dir.path(), Tool::FailOnce, gate(dir.path(), task()), &[call(1, &args()), call(2, &args())]);
     assert_eq!(answer(&msgs, 1)["result"]["isError"], true, "{msgs:?}");
     assert_eq!(answer(&msgs, 2)["result"]["content"][0]["text"], "patched", "{msgs:?}");
@@ -410,7 +412,7 @@ fn a_failed_operation_may_be_retried() {
 #[test]
 fn a_request_reusing_an_in_flight_operations_id_cannot_settle_it() {
     let dir = tempfile::tempdir().unwrap();
-    let op = op_id(&args());
+    let op = op_id(dir.path(), &args());
     let bogus = json!({"jsonrpc": "2.0", "id": 1, "method": "bogus/method"}).to_string();
     let msgs = run_steps(
         dir.path(),
@@ -468,7 +470,7 @@ fn warn_mode_tracks_a_side_effecting_call_that_fails_the_gate() {
 #[test]
 fn a_reply_to_an_operation_reconciled_meanwhile_records_no_settlement() {
     let dir = tempfile::tempdir().unwrap();
-    let op = op_id(&args());
+    let op = op_id(dir.path(), &args());
     let ledger_db = dir.path().join("ledger.db");
     let (mut agent, proxy_side) = UnixStream::pair().unwrap();
     let out = Capture::default();
@@ -515,7 +517,7 @@ fn a_side_effecting_call_reusing_an_outstanding_request_id_is_refused() {
 #[test]
 fn an_upstream_request_with_an_in_flight_id_does_not_settle_the_operation() {
     let dir = tempfile::tempdir().unwrap();
-    let op = op_id(&args());
+    let op = op_id(dir.path(), &args());
     let msgs = run_steps(
         dir.path(),
         slow_tool(dir.path(), true),
@@ -666,7 +668,7 @@ fn the_docs_name_what_the_code_uses() {
     names.push(cloakpipe_release::action::OPERATION_ID_DOMAIN.to_string());
     names.push(RECONCILE_REQUIRED.to_string());
     names.push(Hop::OperationReconciled.tag().to_string());
-    for n in ["operation_unknown", "operation_replayed", "operation_state", "--operations-db", "CLOAKPIPE_OPERATIONS_DB"] {
+    for n in ["operation_unknown", "operation_replayed", "operation_state", "operation_id_key", "HMAC-SHA256", "--operations-db", "CLOAKPIPE_OPERATIONS_DB"] {
         names.push(n.to_string());
     }
     for n in names {

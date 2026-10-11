@@ -9,7 +9,8 @@
 //!
 //! The fingerprint is operator state (receipt file names, the operations
 //! store), never ledger content: low-entropy argument values could be
-//! brute-forced from it.
+//! brute-forced from it. For the same reason a derived operation id, which
+//! is ledger content, is keyed ([`derive_operation_id`]).
 
 use crate::canonical::ReleaseHash;
 use crate::namespace;
@@ -64,16 +65,22 @@ pub fn fingerprint(release: &ReleaseHash, tool: &str, arguments: &Value) -> Tool
 
 /// The operation id of a side-effecting call that has no approval receipt
 /// (a receipt's `operationId` is used when there is one): `op-` + the first
-/// 32 hex digits of `SHA-256(domain || "\n" || task_id || "\n" ||
-/// fingerprint hex)`, where `domain` is [`OPERATION_ID_DOMAIN`]. The same
-/// call in the same task is the same operation; the model never supplies it.
-pub fn derive_operation_id(task_id: &str, fingerprint: &ToolCallFingerprint) -> String {
-    let mut h = Sha256::new();
-    h.update(OPERATION_ID_DOMAIN.as_bytes());
-    h.update(b"\n");
-    h.update(task_id.as_bytes());
-    h.update(b"\n");
-    h.update(fingerprint.hex().as_bytes());
-    let digest = hex::encode(h.finalize());
+/// 32 hex digits of `HMAC-SHA256(key, domain || "\n" || task_id || "\n" ||
+/// fingerprint hex)`, where `domain` is [`OPERATION_ID_DOMAIN`] and `key` is
+/// the operations store's own random secret. The same call in the same task
+/// under the same store is the same operation; the model never supplies it.
+///
+/// The id is recorded in the evidence ledger, beside the release hash, and
+/// task ids are low entropy: the key keeps a ledger holder from testing
+/// guesses of the arguments against it (a plain hash would let them).
+pub fn derive_operation_id(key: &[u8; 32], task_id: &str, fingerprint: &ToolCallFingerprint) -> String {
+    use hmac::{Hmac, Mac};
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(key).expect("HMAC takes a key of any length");
+    mac.update(OPERATION_ID_DOMAIN.as_bytes());
+    mac.update(b"\n");
+    mac.update(task_id.as_bytes());
+    mac.update(b"\n");
+    mac.update(fingerprint.hex().as_bytes());
+    let digest = hex::encode(mac.finalize().into_bytes());
     format!("op-{}", &digest[..32])
 }

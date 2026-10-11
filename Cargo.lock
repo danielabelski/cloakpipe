@@ -675,6 +675,7 @@ name = "cloakpipe-release"
 version = "0.10.0"
 dependencies = [
  "hex",
+ "hmac",
  "jsonschema",
  "proptest",
  "regex",

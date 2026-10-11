@@ -69,15 +69,39 @@ fn fingerprints_parse_from_their_display_and_bare_hex() {
 
 // ── derived operation ids ───────────────────────────────────────────────
 
+/// HMAC-SHA256 written out from its definition (RFC 2104), so the test does
+/// not share the implementation's HMAC.
+fn hmac_sha256(key: &[u8; 32], msg: &[u8]) -> [u8; 32] {
+    let mut block = [0u8; 64];
+    block[..32].copy_from_slice(key);
+    let pad = |b: u8| block.iter().map(|k| k ^ b).collect::<Vec<u8>>();
+    let inner = Sha256::new().chain_update(pad(0x36)).chain_update(msg).finalize();
+    Sha256::new().chain_update(pad(0x5c)).chain_update(inner).finalize().into()
+}
+
+const KEY: [u8; 32] = [0x5a; 32];
+
 #[test]
-fn a_derived_operation_id_is_op_plus_32_hex_of_the_domain_task_and_fingerprint() {
+fn a_derived_operation_id_is_op_plus_32_hex_of_a_keyed_mac_of_the_domain_task_and_fingerprint() {
     use cloakpipe_release::action::{derive_operation_id, OPERATION_ID_DOMAIN};
     assert_eq!(OPERATION_ID_DOMAIN, "cloakpipe.co/operation/v1");
     let fp = fingerprint(&release(), "crm.patch", &json!({"stage": "review"}));
-    let expected = hex::encode(Sha256::digest(format!("cloakpipe.co/operation/v1\nt-981\n{}", fp.hex()).as_bytes()));
-    let id = derive_operation_id("t-981", &fp);
+    let expected = hex::encode(hmac_sha256(&KEY, format!("cloakpipe.co/operation/v1\nt-981\n{}", fp.hex()).as_bytes()));
+    let id = derive_operation_id(&KEY, "t-981", &fp);
     assert_eq!(id, format!("op-{}", &expected[..32]));
     assert_eq!(id.len(), 35);
+}
+
+/// The id is recorded in the evidence ledger next to the release hash, and
+/// task ids are low entropy: without the operator's key, a ledger holder
+/// cannot test guesses of the arguments against it.
+#[test]
+fn a_derived_operation_id_is_not_a_plain_hash_of_the_call() {
+    use cloakpipe_release::action::derive_operation_id;
+    let fp = fingerprint(&release(), "crm.patch", &json!({"phone": "+91 98765 43210"}));
+    let plain = hex::encode(Sha256::digest(format!("cloakpipe.co/operation/v1\nt-981\n{}", fp.hex()).as_bytes()));
+    assert_ne!(derive_operation_id(&KEY, "t-981", &fp), format!("op-{}", &plain[..32]));
+    assert_ne!(derive_operation_id(&KEY, "t-981", &fp), derive_operation_id(&[0x5b; 32], "t-981", &fp));
 }
 
 #[test]
@@ -85,9 +109,10 @@ fn the_same_call_in_another_task_is_another_operation() {
     use cloakpipe_release::action::derive_operation_id;
     let fp = fingerprint(&release(), "crm.patch", &json!({"stage": "review"}));
     let other = fingerprint(&release(), "crm.patch", &json!({"stage": "qualified"}));
-    assert_eq!(derive_operation_id("t-981", &fp), derive_operation_id("t-981", &fp));
-    assert_ne!(derive_operation_id("t-981", &fp), derive_operation_id("t-982", &fp));
-    assert_ne!(derive_operation_id("t-981", &fp), derive_operation_id("t-981", &other));
+    let d = |t: &str, fp: &ToolCallFingerprint| derive_operation_id(&KEY, t, fp);
+    assert_eq!(d("t-981", &fp), d("t-981", &fp));
+    assert_ne!(d("t-981", &fp), d("t-982", &fp));
+    assert_ne!(d("t-981", &fp), d("t-981", &other));
     // The fingerprint is fixed-length hex, so the input splits one way only.
-    assert_ne!(derive_operation_id("t-9\n", &fp), derive_operation_id("t-9", &fp));
+    assert_ne!(d("t-9\n", &fp), d("t-9", &fp));
 }

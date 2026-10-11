@@ -45,7 +45,9 @@ may contain breaking changes; these are marked **Breaking**.
   `CLOAKPIPE_OPERATIONS_DB`; required for such tools, so the proxy refuses to
   start without it). The operation id is the approval receipt's
   `operationId`, else derived from the task and the call
-  (`cloakpipe.co/operation/v1`); the model never supplies it. States
+  (`cloakpipe.co/operation/v1`, an HMAC keyed by the operations database's
+  own random key, so the ledger's ids cannot be used to guess arguments);
+  the model never supplies it. States
   `in_flight`, `done`, `failed`, `unknown` and `not_applied`: a retry of a
   `done` call replays the stored result (`_meta.cloakpipe.replayed`), a call
   whose reply was lost (upstream exit, broken pipe, crash) becomes `unknown`

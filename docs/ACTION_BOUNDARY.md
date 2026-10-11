@@ -287,11 +287,14 @@ file the operator owns:
 ```sql
 operations(operation_id TEXT PRIMARY KEY, tool TEXT, call_digest BLOB,
            state TEXT, result TEXT, updated_at TEXT)
+operation_id_key(id INTEGER PRIMARY KEY, key BLOB)  -- one row
 ```
 
 `call_digest` is the call fingerprint and `result` the tool's result as it
-left the tool (masked, before rehydration). Both are local operator state and
-never go into the ledger. The proxy refuses to start (exit 2) when a supplied
+left the tool (masked, before rehydration). `operation_id_key` holds 32
+random bytes made when the database is created: the key for derived
+operation ids. All three are local operator state and never go into the
+ledger. The proxy refuses to start (exit 2) when a supplied
 contract has a `sideEffect: true` tool and no operations database is given.
 Run one proxy per database.
 
@@ -302,10 +305,14 @@ The model never supplies the operation id. It is the approval receipt's
 the task and the call:
 
 ```
-op- + first 32 hex of SHA-256("cloakpipe.co/operation/v1" + "\n" + taskId + "\n" + fingerprint hex)
+op- + first 32 hex of HMAC-SHA256(key, "cloakpipe.co/operation/v1" + "\n" + taskId + "\n" + fingerprint hex)
 ```
 
-So the same call in the same task is the same operation. A side-effecting call
+where `key` is the operations database's `operation_id_key`. So the same
+call in the same task is the same operation (for that database). The id goes
+into the ledger beside the release hash, and task ids are guessable: keying
+it means a ledger holder cannot test guesses of the arguments (a phone
+number, say) against it, as they could against a plain hash. A side-effecting call
 needs the task context's `taskId` (`task_context_missing` without it) and a
 JSON-RPC request id (a notification is refused as `request_id_missing`,
 because its outcome could never be settled).

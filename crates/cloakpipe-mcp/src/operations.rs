@@ -12,7 +12,9 @@
 //! ```
 //!
 //! `call_digest` is the call's fingerprint and `result` the masked result
-//! JSON: local operator state, never ledger content.
+//! JSON: local operator state, never ledger content. A one-row table
+//! `operation_id_key(id, key)` holds the database's random key for derived
+//! operation ids ([`OperationStore::operation_id_key`]).
 //!
 //! States: `in_flight` (forwarded, no reply yet), `done` (replied with a
 //! result; replayed on a retry, never re-executed), `failed` (an error
@@ -196,9 +198,23 @@ impl OperationStore {
                 state TEXT,
                 result TEXT,
                 updated_at TEXT
-            );",
+            );
+            CREATE TABLE IF NOT EXISTS operation_id_key (
+                id INTEGER PRIMARY KEY CHECK (id = 1),
+                key BLOB NOT NULL CHECK (length(key) = 32)
+            );
+            INSERT OR IGNORE INTO operation_id_key (id, key) VALUES (1, randomblob(32));",
         )?;
         Ok(Self { conn })
+    }
+
+    /// This database's secret key for derived operation ids
+    /// ([`cloakpipe_release::action::derive_operation_id`]): 32 random bytes
+    /// made when the database is created. It never leaves the database, so a
+    /// ledger holder cannot test argument guesses against a derived id.
+    pub fn operation_id_key(&self) -> Result<[u8; 32], OperationsError> {
+        let key: Vec<u8> = self.conn.query_row("SELECT key FROM operation_id_key WHERE id = 1", [], |r| r.get(0))?;
+        key.try_into().map_err(|_| OperationsError("operation id key is not 32 bytes".into()))
     }
 
     /// Start-up sweep: every operation a previous process left `in_flight`

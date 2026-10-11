@@ -322,12 +322,19 @@ mod contracts {
         use cloakpipe_release::action::{derive_operation_id, fingerprint};
         let c = contract(true, false);
         let m = release_binding(&[&c]);
-        let g = certified_for(&m).with_contracts(vec![c], Some(task())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let open = || cloakpipe_mcp::operations::OperationStore::open(dir.path().join("ops.db")).unwrap();
+        let key = open().operation_id_key().unwrap();
+        let g = certified_for(&m).with_contracts(vec![c.clone()], Some(task())).unwrap().with_operations(open()).unwrap();
         let auth = g.authorize("crm.patch", Some(&args()), NOW).unwrap();
         let op = auth.operation.expect("a side-effect call is an operation");
         let fp = fingerprint(&m.manifest_hash(), "crm.patch", &args());
         assert_eq!(op.fingerprint, fp);
-        assert_eq!(op.operation_id, derive_operation_id("t-981", &fp));
+        // Keyed by the operations database's own key.
+        assert_eq!(op.operation_id, derive_operation_id(&key, "t-981", &fp));
+        // Without an operations store there is no key: no operation can be named.
+        let bare = certified_for(&m).with_contracts(vec![c], Some(task())).unwrap();
+        assert_eq!(bare.check("crm.patch", Some(&args()), NOW), Err(Denial::OperationsUnavailable));
         assert!(auth.approval.is_none());
         // Same call, same operation; another call, another operation.
         assert_eq!(g.authorize("crm.patch", Some(&args()), NOW).unwrap().operation.unwrap().operation_id, op.operation_id);

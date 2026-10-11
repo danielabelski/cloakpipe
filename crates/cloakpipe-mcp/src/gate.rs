@@ -34,7 +34,7 @@
 //!
 //! A contract tool with `sideEffect: true` is an *operation*
 //! ([`crate::operations`]): [`ToolGate::authorize`] names it (the receipt's
-//! `operationId`, else [`derive_operation_id`] from the task context's
+//! `operationId`, else [`derive_operation_id`], keyed by the store, from the task context's
 //! `taskId` and the call fingerprint) and the interceptor runs it through
 //! the operations store given to [`ToolGate::with_operations`], so a call
 //! whose outcome is unknown is never silently re-executed. A gate with such
@@ -266,6 +266,8 @@ pub struct ToolGate {
     operations: Option<Arc<Mutex<OperationStore>>>,
     /// Operations the start-up sweep found left in flight (now `unknown`).
     recovered: Vec<String>,
+    /// The operations store's key for derived operation ids.
+    operation_id_key: Option<[u8; 32]>,
 }
 
 impl ToolGate {
@@ -306,6 +308,7 @@ impl ToolGate {
             approvals: None,
             operations: None,
             recovered: Vec::new(),
+            operation_id_key: None,
         }
     }
 
@@ -353,6 +356,7 @@ impl ToolGate {
     /// [`Self::recovered_operations`]): one gate per operations database.
     pub fn with_operations(mut self, mut store: OperationStore) -> Result<Self, GateConfigError> {
         self.recovered = store.recover().map_err(|e| GateConfigError::OperationsStore(e.to_string()))?;
+        self.operation_id_key = Some(store.operation_id_key().map_err(|e| GateConfigError::OperationsStore(e.to_string()))?);
         self.operations = Some(Arc::new(Mutex::new(store)));
         Ok(self)
     }
@@ -466,7 +470,9 @@ impl ToolGate {
         let release: ReleaseHash = self.release.parse().map_err(|_| Denial::OperationsUnavailable)?;
         let fp = fingerprint(&release, tool, arguments);
         let task_id = self.task_id().ok_or(Denial::TaskContextMissing { path: None })?;
-        Ok(OperationKey { operation_id: derive_operation_id(task_id, &fp), fingerprint: fp })
+        // Without an operations store there is no key (and `ready` refuses).
+        let key = self.operation_id_key.as_ref().ok_or(Denial::OperationsUnavailable)?;
+        Ok(OperationKey { operation_id: derive_operation_id(key, task_id, &fp), fingerprint: fp })
     }
 
     /// The trusted task context's `taskId`.
