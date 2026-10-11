@@ -1050,3 +1050,94 @@ fn verify_cert_rejects_a_non_envelope_with_exit_1() {
     let (code, out, err) = run(&["release", "verify-cert", &junk]);
     assert_eq!(code, 1, "{out}{err}");
 }
+
+// ── two-way boundary ────────────────────────────────────────────────────
+
+/// Import `boundary/<junit>` as an authorization run and certify it with
+/// `boundary/policy.yaml`; returns (exit, stdout, stderr, envelope path).
+fn certify_boundary(dir: &tempfile::TempDir, junit: &str) -> (i32, String, String, String) {
+    let key = keygen(dir, "key.json");
+    let run_file = path(dir, "run.json");
+    let (code, _, err) = run(&[
+        "eval", "import", "--junit", &fixture(&format!("boundary/{junit}")), "--release", &manifest(), "--suite",
+        "authz@1", "--covers", "authorization", "--out", &run_file,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let run_json = read_json(&run_file);
+    assert!(run_json["cases"].as_array().unwrap().iter().all(|c| c["expect"] == "allow" || c["expect"] == "deny"));
+    let (policy, m, out) = (fixture("boundary/policy.yaml"), manifest(), path(dir, "cert.dsse.json"));
+    let (code, stdout, stderr) = run(&[
+        "release", "certify", &m, "--policy", &policy, "--run", &run_file, "--require", "authorization",
+        "--environment", "production", "--issuer", "ci:acme/support", "--key", &key, "--now", NOW, "--out", &out,
+    ]);
+    (code, stdout, stderr, out)
+}
+
+fn attested_codes(envelope: &str) -> Vec<String> {
+    let st = payload(envelope);
+    st["predicate"]["certification"]["decision"]["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["code"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn certify_blocks_a_refuse_everything_agent_with_over_refusal() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, out, err, env) = certify_boundary(&dir, "refuse-all.junit.xml");
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.starts_with("BLOCKED"), "{out}");
+    assert!(out.contains("over_refusal [authorization]"), "{out}");
+    assert_eq!(attested_codes(&env), vec!["over_refusal"]);
+}
+
+#[test]
+fn certify_blocks_an_allow_everything_agent_with_under_blocking() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, out, err, env) = certify_boundary(&dir, "allow-all.junit.xml");
+    assert_eq!(code, 1, "{out}{err}");
+    assert!(out.contains("under_blocking [authorization]"), "{out}");
+    assert_eq!(attested_codes(&env), vec!["under_blocking"]);
+}
+
+#[test]
+fn certify_certifies_an_agent_that_holds_the_boundary_both_ways() {
+    let dir = tempfile::tempdir().unwrap();
+    let (code, out, err, env) = certify_boundary(&dir, "balanced.junit.xml");
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.starts_with("CERTIFIED"), "{out}");
+    assert!(attested_codes(&env).is_empty());
+    let (code, out, err) = run(&["release", "verify-cert", &env, "--trust", &path(&dir, "key.json"), "--now", NOW]);
+    assert_eq!(code, 0, "{out}{err}");
+}
+
+#[test]
+fn certify_reports_boundary_incomplete_for_unlabelled_authorization_cases() {
+    let dir = tempfile::tempdir().unwrap();
+    let key = keygen(&dir, "key.json");
+    let run_file = path(&dir, "run.json");
+    let (code, _, err) = run(&[
+        "eval", "import", "--junit", &fixture("passing.junit.xml"), "--release", &manifest(), "--suite", "authz@1",
+        "--covers", "authorization", "--out", &run_file,
+    ]);
+    assert_eq!(code, 0, "{err}");
+    let (policy, m, out) = (fixture("boundary/policy.yaml"), manifest(), path(&dir, "cert.dsse.json"));
+    let (code, stdout, _) = run(&[
+        "release", "certify", &m, "--policy", &policy, "--run", &run_file, "--environment", "production",
+        "--issuer", "ci:acme/support", "--key", &key, "--now", NOW, "--out", &out,
+    ]);
+    assert_eq!(code, 1, "{stdout}");
+    assert!(stdout.contains("boundary_incomplete [authorization]"), "{stdout}");
+    assert_eq!(attested_codes(&out), vec!["boundary_incomplete"]);
+}
+
+#[test]
+fn certification_doc_shows_the_tested_boundary_policy() {
+    // The policy in docs/CERTIFICATION.md is the fixture these tests run.
+    let doc = std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs/CERTIFICATION.md"))
+        .unwrap();
+    let policy = std::fs::read_to_string(fixture("boundary/policy.yaml")).unwrap();
+    assert!(doc.contains(&format!("```yaml\n{policy}```")), "docs/CERTIFICATION.md must embed boundary/policy.yaml");
+}

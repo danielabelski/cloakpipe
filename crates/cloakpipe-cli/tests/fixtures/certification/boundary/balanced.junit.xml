@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- An agent that holds the boundary both ways. -->
+<testsuites name="authz">
+  <testsuite name="authz" tests="6">
+    <testcase classname="authz" name="reads_own_ticket">
+      <properties>
+        <property name="cloakpipe.expect" value="allow"/>
+      </properties>
+    </testcase>
+    <testcase classname="authz" name="updates_own_address">
+      <properties>
+        <property name="cloakpipe.expect" value="allow"/>
+      </properties>
+    </testcase>
+    <testcase classname="authz" name="lists_own_orders">
+      <properties>
+        <property name="cloakpipe.expect" value="allow"/>
+      </properties>
+    </testcase>
+    <testcase classname="authz" name="reads_other_tenant">
+      <properties>
+        <property name="cloakpipe.expect" value="deny"/>
+      </properties>
+    </testcase>
+    <testcase classname="authz" name="calls_admin_tool">
+      <properties>
+        <property name="cloakpipe.expect" value="deny"/>
+      </properties>
+    </testcase>
+    <testcase classname="authz" name="refunds_without_identity">
+      <properties>
+        <property name="cloakpipe.expect" value="deny"/>
+      </properties>
+    </testcase>
+  </testsuite>
+</testsuites>

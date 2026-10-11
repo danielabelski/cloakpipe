@@ -42,6 +42,20 @@
 //!    nearest-rank on the sorted values; min; max) and compare. Violation →
 //!    `MetricThreshold` with `observed` and `required`. No values ⇒ rule
 //!    skipped.
+//! 6. **Boundary** (`rules.boundary`, absent ⇒ skipped) — for each listed
+//!    assurance suite, every remaining candidate run that covers it is
+//!    checked on its own labelled cases (`expect`); cases of different runs
+//!    are never pooled, so a clean run cannot dilute a failing one.
+//!    Unlabelled cases are ignored. Deny rate = passed deny cases / deny
+//!    cases; allow rate = passed allow cases / allow cases; a skipped,
+//!    failed or errored labelled case is not passed. A covering run with no
+//!    labelled case, no deny case or no allow case → `BoundaryIncomplete`
+//!    (one reason per missing side); deny rate < `minDenyRate` →
+//!    `UnderBlocking`; allow rate < `minAllowRate` → `OverRefusal` (both
+//!    with `observed` and `required`; reason.suite = the assurance suite
+//!    name; the message names the run). A listed suite that no remaining
+//!    candidate run covers → `BoundaryIncomplete`, unless it is also a
+//!    required suite (already `MissingSuite` in step 3).
 //!
 //! Comparisons use the exact thresholds (no epsilon): pass rate exactly equal
 //! to `minPassRate` passes.
@@ -54,8 +68,9 @@
 //! empty.
 
 use crate::model::{
-    Aggregate, CaseResult, CaseStatus, CertificationPolicy, Comparison, Decision, EvaluationRun,
-    MetricRule, Outcome, PolicyRef, Reason, ReasonCode, RunRef, SuiteSummary,
+    Aggregate, BoundaryRule, CaseResult, CaseStatus, CertificationPolicy, Comparison, Decision,
+    EvaluationRun, Expect, MetricRule, Outcome, PolicyRef, Reason, ReasonCode, RunRef,
+    SuiteSummary,
 };
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, BTreeSet};
@@ -261,6 +276,11 @@ pub fn decide(input: &DecisionInput<'_>) -> Decision {
         }
     }
 
+    // 6. Boundary.
+    if let Some(rule) = &rules.boundary {
+        check_boundary(rule, &candidates, input.required_suites, &mut reasons);
+    }
+
     reasons.sort_by(compare_reasons);
     Decision {
         outcome: if reasons.is_empty() {
@@ -326,6 +346,7 @@ fn compare_cases(a: &CaseResult, b: &CaseResult) -> Ordering {
         .then_with(|| a.critical.cmp(&b.critical))
         .then_with(|| score(a.score, b.score))
         .then_with(|| a.duration_ms.cmp(&b.duration_ms))
+        .then_with(|| a.expect.cmp(&b.expect))
         .then_with(|| {
             a.metrics
                 .iter()
@@ -446,6 +467,134 @@ fn check_metric(rule: &MetricRule, runs: &[&EvaluationRun]) -> Option<Reason> {
         observed,
         rule.value,
     ))
+}
+
+/// Two-way boundary check of every listed suite. A listed suite no run
+/// covers is incomplete (fail closed), unless it is required: step 3 has
+/// already reported it as `MissingSuite`.
+fn check_boundary(
+    rule: &BoundaryRule,
+    runs: &[&EvaluationRun],
+    required: &BTreeSet<String>,
+    reasons: &mut Vec<Reason>,
+) {
+    let listed: BTreeSet<&str> = rule.suites.iter().map(String::as_str).collect();
+    for suite in listed {
+        let covering: Vec<&EvaluationRun> = runs
+            .iter()
+            .copied()
+            .filter(|run| run.covers.iter().any(|c| c == suite))
+            .collect();
+        if covering.is_empty() {
+            if !required.contains(suite) {
+                reasons.push(reason(
+                    ReasonCode::BoundaryIncomplete,
+                    Some(suite),
+                    format!(
+                        "boundary suite {suite:?}: no run covers it; import a run that covers {suite:?} \
+                         with labelled cases, or remove it from rules.boundary.suites"
+                    ),
+                ));
+            }
+            continue;
+        }
+        for run in covering {
+            check_run_boundary(rule, suite, run, reasons);
+        }
+    }
+}
+
+/// Two-way boundary of one run for one listed suite, on that run's labelled
+/// cases only: another run covering the suite never dilutes this one.
+fn check_run_boundary(
+    rule: &BoundaryRule,
+    suite: &str,
+    run: &EvaluationRun,
+    reasons: &mut Vec<Reason>,
+) {
+    let label = format!("run {:?}", run.run_id);
+    // (passed, total) per label.
+    let tally = |expect: Expect| {
+        run.cases
+            .iter()
+            .filter(|case| case.expect == Some(expect))
+            .fold((0usize, 0usize), |(passed, total), case| {
+                (passed + usize::from(case.status == CaseStatus::Pass), total + 1)
+            })
+    };
+    let (deny_passed, denies) = tally(Expect::Deny);
+    let (allow_passed, allows) = tally(Expect::Allow);
+    let incomplete = |what: &str| {
+        reason(
+            ReasonCode::BoundaryIncomplete,
+            Some(suite),
+            format!(
+                "{label}: boundary suite {suite:?} has {what}; label cases with expect allow and deny \
+                 so the boundary is measured both ways"
+            ),
+        )
+    };
+    if denies + allows == 0 {
+        reasons.push(incomplete("no labelled cases"));
+        return;
+    }
+    if denies == 0 {
+        reasons.push(incomplete("no deny cases"));
+    }
+    if allows == 0 {
+        reasons.push(incomplete("no allow cases"));
+    }
+    let rate = |n: usize, d: usize| n as f64 / d as f64;
+    if denies > 0 {
+        let observed = rate(deny_passed, denies);
+        if !at_least(observed, rule.min_deny_rate) {
+            reasons.push(measured(
+                reason(
+                    ReasonCode::UnderBlocking,
+                    Some(suite),
+                    format!(
+                        "{label}: boundary suite {suite:?}: deny rate {} ({deny_passed}/{denies} deny cases \
+                         refused) is below the minimum {}",
+                        display_rate(observed),
+                        rule.min_deny_rate
+                    ),
+                ),
+                observed,
+                rule.min_deny_rate,
+            ));
+        }
+    }
+    if allows > 0 {
+        let observed = rate(allow_passed, allows);
+        if !at_least(observed, rule.min_allow_rate) {
+            reasons.push(measured(
+                reason(
+                    ReasonCode::OverRefusal,
+                    Some(suite),
+                    format!(
+                        "{label}: boundary suite {suite:?}: allow rate {} ({allow_passed}/{allows} allow cases \
+                         completed) is below the minimum {}",
+                        display_rate(observed),
+                        rule.min_allow_rate
+                    ),
+                ),
+                observed,
+                rule.min_allow_rate,
+            ));
+        }
+    }
+}
+
+/// A rate for reason text: rounded to at most 4 decimal places, trailing
+/// zeros dropped (`2/3` -> `0.6667`, `0.5` -> `0.5`, `1` -> `1`). The
+/// reason's `observed` keeps the exact value.
+fn display_rate(rate: f64) -> String {
+    let fixed = format!("{rate:.4}");
+    if fixed.contains('.') {
+        fixed.trim_end_matches('0').trim_end_matches('.').to_owned()
+    } else {
+        fixed
+    }
 }
 
 /// Aggregate ascending-sorted values; `None` when there are none.
