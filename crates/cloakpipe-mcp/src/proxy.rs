@@ -60,6 +60,11 @@ type SharedOperations = Option<Arc<Mutex<OperationStore>>>;
 struct PendingOps {
     /// JSON-RPC request id (serialized) -> operation id.
     by_request: HashMap<String, String>,
+    /// Other agent requests forwarded and not yet answered: request id
+    /// (serialized) -> how many. A side-effecting call may not reuse one of
+    /// these ids, nor any request reuse the id of a call in `by_request`, so
+    /// a reply always maps to the request it answers.
+    outstanding: HashMap<String, usize>,
     /// Set by the exit sweep: no call may start after it.
     closed: bool,
 }
@@ -157,6 +162,30 @@ where
                 }
                 let out = match serde_json::from_str::<Value>(&line) {
                     Ok(mut msg) => {
+                        // An agent request (any method) reusing the id of a
+                        // side-effecting call in flight: its reply would be
+                        // taken for the call's and settle the operation.
+                        let request_id = msg.get("method").and(msg.get("id")).filter(|id| !id.is_null()).map(Value::to_string);
+                        if let (Some(gate), Some(_), Some(request)) = (&gate, &operations, &request_id) {
+                            let in_use = pending.lock().map(|p| p.by_request.contains_key(request)).unwrap_or(true);
+                            if in_use {
+                                let code = Denial::RequestIdInUse.code();
+                                record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, 0, ActionKind::Block, &[opaque("gate_denial", &code)]);
+                                let refusal = serde_json::json!({
+                                    "jsonrpc": "2.0",
+                                    "id": msg.get("id"),
+                                    "error": {
+                                        "code": TOOL_REFUSED,
+                                        "message": format!("message refused by CloakPipe: {code}"),
+                                        "data": { "reason": code, "release": gate.release() },
+                                    },
+                                });
+                                if write_line(&agent_out, &refusal.to_string()).is_err() {
+                                    break;
+                                }
+                                continue;
+                            }
+                        }
                         if msg.get("method").and_then(Value::as_str) == Some("tools/call") {
                             // Ledger metadata for the forwarded call: a warn-mode
                             // violation, the approval it was allowed on, the operation.
@@ -257,6 +286,15 @@ where
                             };
                             if masked > 0 || !evidence.is_empty() {
                                 record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, masked, ActionKind::Pseudonymize, &evidence);
+                            }
+                        }
+                        // Every other forwarded request is outstanding until
+                        // answered (a side-effecting call is in `by_request`).
+                        if let (Some(_), Some(request)) = (&operations, request_id) {
+                            if let Ok(mut p) = pending.lock() {
+                                if !p.by_request.contains_key(&request) {
+                                    *p.outstanding.entry(request).or_default() += 1;
+                                }
                             }
                         }
                         serde_json::to_string(&msg).unwrap_or(line)
@@ -371,7 +409,7 @@ fn coordinate(
     if pending.closed {
         return Coordinated::Deny(Denial::OperationsUnavailable);
     }
-    if pending.by_request.contains_key(&request) {
+    if pending.by_request.contains_key(&request) || pending.outstanding.contains_key(&request) {
         return Coordinated::Deny(Denial::RequestIdInUse);
     }
     let Ok(mut store) = store.lock() else { return Coordinated::Deny(Denial::OperationsUnavailable) };
@@ -424,12 +462,27 @@ fn replayed(stored: Option<&str>, operation_id: &str, vault: &Mutex<Vault>) -> O
 /// Settle the operation an upstream reply answers: a `result` without
 /// `isError: true` is `done` (its masked result stored for replay); an
 /// error result or a JSON-RPC `error` is `failed`. Returns the operation and
-/// its new state, or `None` when the reply answers no side-effecting call.
+/// its new state, or `None` when the message answers no side-effecting call.
+/// Only a reply settles: a request or notification from the upstream
+/// (`method`), or a message with neither `result` nor `error`, never does,
+/// whatever its id.
 fn settle_reply(operations: &SharedOperations, pending: &Pending, msg: &Value) -> Option<(String, OperationState)> {
     let store = operations.as_ref()?;
+    if msg.get("method").is_some() || (msg.get("result").is_none() && msg.get("error").is_none()) {
+        return None;
+    }
     let request = msg.get("id")?.to_string();
     let mut pending = pending.lock().ok()?;
-    let operation_id = pending.by_request.remove(&request)?;
+    let Some(operation_id) = pending.by_request.remove(&request) else {
+        // The reply to another request: it is no longer outstanding.
+        if let Some(n) = pending.outstanding.get_mut(&request) {
+            *n -= 1;
+            if *n == 0 {
+                pending.outstanding.remove(&request);
+            }
+        }
+        return None;
+    };
     let result = msg.get("result").filter(|_| msg.get("error").is_none());
     let done = result.is_some_and(|r| r.get("isError") != Some(&Value::Bool(true)));
     let (state, stored) = if done {

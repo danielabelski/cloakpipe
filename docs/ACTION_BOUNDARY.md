@@ -348,9 +348,14 @@ waiting request gets a `-32002` error with reason `operation_unknown` and its
 `in_flight` (it crashed) becomes `unknown`. Operation tracking also applies
 with `--gate warn`: it is not a release rule.
 
-Other refusals: `request_id_in_use` (a side-effecting call reusing the
-request id of a call still in flight) and `operations_unavailable` (the
-store cannot be read or written; fail closed).
+Other refusals: `request_id_in_use` and `operations_unavailable` (the store
+cannot be read or written; fail closed). `request_id_in_use` refuses a
+side-effecting call reusing the request id of any agent request still
+waiting for its reply, and any agent request (whatever its method) reusing
+the request id of a side-effecting call in flight: a reply must map to one
+request only. Only a reply settles an operation: a message from the tool
+server that carries a `method` (its own request, such as `roots/list` or
+`ping`) or has neither `result` nor `error` never does, whatever its id.
 
 ### Reconciling
 

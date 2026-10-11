@@ -82,6 +82,66 @@ done
     vec!["sh".into(), script.to_string_lossy().into_owned()]
 }
 
+/// A slow tool: each `tools/call` is committed (one line in `effects.jsonl`)
+/// and answered with a result two seconds later; any other method gets an
+/// immediate JSON-RPC error (a `slow/...` method gets it two seconds later). With `ask_roots`, the tool also sends the agent
+/// its own `roots/list` request, under the same id as the call, right away.
+fn slow_tool(dir: &Path, ask_roots: bool) -> Vec<String> {
+    let effects = dir.join("effects.jsonl");
+    let script = dir.join(format!("slow-{}.sh", uuid::Uuid::new_v4()));
+    let ask = if ask_roots { r#"printf '{"jsonrpc":"2.0","id":%s,"method":"roots/list"}\n' "$id""# } else { ":" };
+    std::fs::write(
+        &script,
+        format!(
+            r#"#!/bin/sh
+while IFS= read -r line; do
+  id=$(printf '%s' "$line" | sed 's/^{{"id":\([0-9]*\),.*$/\1/')
+  case "$line" in
+    *'"method":"tools/call"'*)
+      printf '%s\n' "$line" >> '{effects}'
+      {ask}
+      (sleep 2; printf '{{"id":%s,"jsonrpc":"2.0","result":{{"content":[{{"type":"text","text":"patched"}}]}}}}\n' "$id") &
+      ;;
+    *'"method":"slow/'*)
+      (sleep 2; printf '{{"id":%s,"jsonrpc":"2.0","error":{{"code":-32601,"message":"method not found"}}}}\n' "$id") &
+      ;;
+    *'"method":'*)
+      printf '{{"id":%s,"jsonrpc":"2.0","error":{{"code":-32601,"message":"method not found"}}}}\n' "$id"
+      ;;
+  esac
+done
+wait
+"#,
+            effects = effects.display()
+        ),
+    )
+    .unwrap();
+    vec!["sh".into(), script.to_string_lossy().into_owned()]
+}
+
+/// Run the interceptor over `upstream`, sending each line and then waiting
+/// until the agent has received at least the given number of messages.
+fn run_steps(dir: &Path, upstream: Vec<String>, gate: ToolGate, steps: &[(String, usize)]) -> Vec<Value> {
+    let (mut agent, proxy_side) = UnixStream::pair().unwrap();
+    let out = Capture::default();
+    let context = ctx(gate, &dir.join("ledger.db"));
+    let writer = out.clone();
+    let reader = proxy_side.try_clone().unwrap();
+    let handle = std::thread::spawn(move || run_proxy_io(upstream, context, reader, writer).unwrap());
+    for (line, n) in steps {
+        agent.write_all(format!("{line}\n").as_bytes()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while out.messages().len() < *n {
+            assert!(Instant::now() < deadline, "after {line}: {:?}", out.messages());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+    agent.shutdown(std::net::Shutdown::Write).unwrap();
+    drop(proxy_side);
+    handle.join().unwrap();
+    out.messages()
+}
+
 fn effects(dir: &Path) -> usize {
     std::fs::read_to_string(dir.join("effects.jsonl")).map(|s| s.lines().count()).unwrap_or(0)
 }
@@ -342,6 +402,65 @@ fn a_failed_operation_may_be_retried() {
         .filter_map(|r| meta(r, "operation_state").map(str::to_string))
         .collect();
     assert_eq!(states, ["failed", "done"]);
+}
+
+/// Another agent request reusing the id of a side-effecting call in flight
+/// is refused: its reply would otherwise settle the operation `failed` and
+/// let a retry run the effect a second time.
+#[test]
+fn a_request_reusing_an_in_flight_operations_id_cannot_settle_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let op = op_id(&args());
+    let bogus = json!({"jsonrpc": "2.0", "id": 1, "method": "bogus/method"}).to_string();
+    let msgs = run_steps(
+        dir.path(),
+        slow_tool(dir.path(), false),
+        gate(dir.path(), task()),
+        &[(call(1, &args()), 0), (bogus, 1), (call(2, &args()), 2)],
+    );
+    assert_eq!(effects(dir.path()), 1, "the effect ran once: {msgs:?}");
+    assert_eq!(state(dir.path(), &op), OperationState::Done, "{msgs:?}");
+    let refused = &msgs[0];
+    assert_eq!(refused["id"], 1, "{msgs:?}");
+    assert_eq!(refused["error"]["data"]["reason"], "request_id_in_use", "{msgs:?}");
+    assert_eq!(answer(&msgs, 2)["error"]["data"]["reason"], "reconcile_before_retry", "{msgs:?}");
+    let replies: Vec<_> = msgs.iter().filter(|m| m["id"] == 1 && m.get("result").is_some()).collect();
+    assert_eq!(replies.len(), 1, "the call's own reply still reaches the agent: {msgs:?}");
+}
+
+/// A side-effecting call may not reuse the id of another request still
+/// waiting for its reply either.
+#[test]
+fn a_side_effecting_call_reusing_an_outstanding_request_id_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let slow = json!({"jsonrpc": "2.0", "id": 1, "method": "slow/method"}).to_string();
+    let msgs = run_steps(dir.path(), slow_tool(dir.path(), false), gate(dir.path(), task()), &[(slow, 0), (call(1, &args()), 1)]);
+    assert_eq!(msgs[0]["error"]["data"]["reason"], "request_id_in_use", "{msgs:?}");
+    assert_eq!(effects(dir.path()), 0, "{msgs:?}");
+}
+
+/// A request from the upstream (sampling, roots/list, ping) whose id equals
+/// an in-flight call's id is not that call's reply.
+#[test]
+fn an_upstream_request_with_an_in_flight_id_does_not_settle_the_operation() {
+    let dir = tempfile::tempdir().unwrap();
+    let op = op_id(&args());
+    let msgs = run_steps(
+        dir.path(),
+        slow_tool(dir.path(), true),
+        gate(dir.path(), task()),
+        &[(call(1, &args()), 1), (call(2, &args()), 2)],
+    );
+    assert_eq!(msgs[0]["method"], "roots/list", "the upstream request reaches the agent: {msgs:?}");
+    assert_eq!(answer(&msgs, 2)["error"]["data"]["reason"], "reconcile_before_retry", "{msgs:?}");
+    assert_eq!(effects(dir.path()), 1, "the effect ran once: {msgs:?}");
+    assert_eq!(state(dir.path(), &op), OperationState::Done);
+    let states: Vec<_> = ledger(&dir.path().join("ledger.db"))
+        .iter()
+        .filter(|r| r.hop == Hop::McpToolResult)
+        .filter_map(|r| meta(r, "operation_state").map(str::to_string))
+        .collect();
+    assert_eq!(states, ["done"]);
 }
 
 #[test]
