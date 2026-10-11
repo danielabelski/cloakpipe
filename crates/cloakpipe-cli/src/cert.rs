@@ -646,6 +646,11 @@ pub struct McpProxyArgs {
     /// only): receipts must be signed by one of these keys.
     #[arg(long = "approver-key")]
     pub approver_keys: Vec<PathBuf>,
+    /// Operations database (SQLite) tracking side-effecting calls (contract
+    /// tools with sideEffect: true): required when the contracts have any.
+    /// Default: $CLOAKPIPE_OPERATIONS_DB. One proxy per database.
+    #[arg(long = "operations-db")]
+    pub operations_db: Option<PathBuf>,
 }
 
 /// Build the tool gate for `mcp-proxy`; `Ok(None)` without `--manifest`.
@@ -663,7 +668,8 @@ pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::Tool
             || !a.tool_contracts.is_empty()
             || a.task_context.is_some()
             || a.approvals.is_some()
-            || !a.approver_keys.is_empty();
+            || !a.approver_keys.is_empty()
+            || a.operations_db.is_some();
         if gate_flags {
             return Err(usage("release gate flags need --manifest (the release they are about)"));
         }
@@ -725,6 +731,20 @@ pub(crate) fn gate_from_args(a: &McpProxyArgs) -> Res<Option<cloakpipe_mcp::Tool
     if let Some((dir, approvers)) = approvals {
         gate = gate.with_approvals(dir, approvers);
     }
+    let operations_db = a
+        .operations_db
+        .clone()
+        .or_else(|| std::env::var_os("CLOAKPIPE_OPERATIONS_DB").filter(|v| !v.is_empty()).map(PathBuf::from));
+    if let Some(path) = operations_db {
+        let store = cloakpipe_mcp::operations::OperationStore::open(&path)
+            .map_err(|e| usage(format_args!("--operations-db {}: {e}", path.display())))?;
+        gate = gate.with_operations(store).map_err(usage)?;
+        for op in gate.recovered_operations() {
+            eprintln!("warning: operation {op} was left in flight by a previous run: its outcome is unknown until reconciled (cloakpipe operations reconcile)");
+        }
+    }
+    // A side-effect tool with no operations store must not run.
+    gate.ready().map_err(usage)?;
     Ok(Some(gate))
 }
 

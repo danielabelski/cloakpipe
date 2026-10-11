@@ -5,6 +5,7 @@ mod anchor;
 mod audit_pack;
 mod cert;
 mod commands;
+mod operations;
 mod release;
 
 use clap::{Parser, Subcommand};
@@ -76,6 +77,11 @@ enum Commands {
     },
     /// Sign an approval receipt for one exact tool call (for mcp-proxy --approvals)
     Approve(action::ApproveArgs),
+    /// Side-effecting tool calls tracked by mcp-proxy --operations-db: list, reconcile
+    Operations {
+        #[command(subcommand)]
+        action: operations::OperationsCommands,
+    },
     /// Evaluation runs: import external results as certification evidence
     Eval {
         #[command(subcommand)]
@@ -193,6 +199,7 @@ fn main() -> anyhow::Result<()> {
         Commands::Anchor(args) => std::process::exit(anchor::run(args)),
         Commands::Action { action } => std::process::exit(action::run(action)),
         Commands::Approve(args) => std::process::exit(action::approve(args)),
+        Commands::Operations { action } => std::process::exit(operations::run(action)),
         other => other,
     };
 
@@ -225,7 +232,8 @@ async fn run(command: Commands, config: String) -> anyhow::Result<()> {
         | Commands::Eval { .. }
         | Commands::Anchor(_)
         | Commands::Action { .. }
-        | Commands::Approve(_) => unreachable!("handled above"),
+        | Commands::Approve(_)
+        | Commands::Operations { .. } => unreachable!("handled above"),
         Commands::Scan { input, output, strategy, detect_only, min_confidence } => {
             commands::scan(&config, input, output, strategy, detect_only, min_confidence).await
         }
