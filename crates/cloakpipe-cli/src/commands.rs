@@ -428,9 +428,11 @@ fn release_from_var(v: Result<String, std::env::VarError>) -> Result<Option<[u8;
     }
 }
 
-/// Transparent MCP interceptor (M8) — proxy an upstream MCP server, masking PII
-/// in tool-call arguments before they reach the tool and rehydrating pseudonym
-/// tokens in the results before the agent sees them. Set `CLOAKPIPE_LEDGER_DB`
+/// Transparent MCP interceptor — proxy an upstream MCP server, forwarding
+/// tool calls unchanged (or refusing them, with `--manifest`). With
+/// `--transform pii` it masks PII in tool-call arguments before they reach the
+/// tool and rehydrates pseudonym tokens in the results before the agent sees
+/// them; only then is a vault opened. Set `CLOAKPIPE_LEDGER_DB`
 /// to record a no-PII evidence hop per call/result, and `CLOAKPIPE_RELEASE`
 /// (`sha256:<hex>` from `cloakpipe release hash`) to bind each hop to the
 /// Agent Release being run. `--tool-contract` / `--task-context` add
@@ -442,21 +444,29 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         Ok(gate) => gate,
         Err(code) => std::process::exit(code),
     };
+    let pii = args.pii();
     let upstream = args.upstream;
-    let config = if std::path::Path::new(config_path).exists() {
-        load_config(config_path)?
-    } else {
-        tracing::info!("No config file found, using defaults");
-        default_config()
-    };
 
     let parts = shell_words::split(&upstream)
         .map_err(|e| anyhow::anyhow!("failed to parse --upstream command ({upstream:?}): {e}"))?;
     anyhow::ensure!(!parts.is_empty(), "--upstream command is empty");
 
-    let key = resolve_vault_key(&config)?;
-    let vault = cloakpipe_core::vault::Vault::open(&config.vault.path, key)?;
-    let detector = cloakpipe_core::detector::Detector::from_config(&config.detection)?;
+    // The vault and detector exist only for the opt-in PII transform.
+    let pii = if pii {
+        let config = if std::path::Path::new(config_path).exists() {
+            load_config(config_path)?
+        } else {
+            tracing::info!("No config file found, using defaults");
+            default_config()
+        };
+        let key = resolve_vault_key(&config)?;
+        Some(cloakpipe_mcp::PiiTransform {
+            vault: cloakpipe_core::vault::Vault::open(&config.vault.path, key)?,
+            detector: cloakpipe_core::detector::Detector::from_config(&config.detection)?,
+        })
+    } else {
+        None
+    };
     let ledger_db = std::env::var("CLOAKPIPE_LEDGER_DB").ok();
     let mut release = release_from_var(std::env::var("CLOAKPIPE_RELEASE"))?;
     if let Some(gate) = &gate {
@@ -473,8 +483,7 @@ pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Re
         cloakpipe_mcp::run_proxy(
             parts,
             cloakpipe_mcp::ProxyContext {
-                detector,
-                vault,
+                pii,
                 ledger_db,
                 release,
                 gate,

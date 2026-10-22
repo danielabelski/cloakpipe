@@ -124,7 +124,7 @@ object is invalid input (exit 1).
 
 For each `tools/call` to a tool a contract covers, after the release checks
 (declared tool, certification), the gate validates the **raw** arguments, as
-the agent sent them, before PII masking. Declared tools that no contract
+the agent sent them (before the opt-in `--transform pii` masks anything). Declared tools that no contract
 covers behave as before. Refusals use the usual JSON-RPC error `-32001`:
 
 ```json
@@ -290,20 +290,25 @@ file the operator owns:
 
 ```sql
 operations(operation_id TEXT PRIMARY KEY, tool TEXT, call_digest BLOB,
-           state TEXT, result TEXT, updated_at TEXT)
+           state TEXT, result TEXT, updated_at TEXT, result_masked INTEGER)
 operation_id_key(id INTEGER PRIMARY KEY, key BLOB)  -- one row
 ```
 
 `call_digest` is the call fingerprint and `result` the tool's result as it
-left the tool (masked, before rehydration). `operation_id_key` holds 32
+left the tool (before rehydration). `result_masked` is 1 when the proxy ran
+with `--transform pii`, so the stored result holds pseudonym tokens. `operation_id_key` holds 32
 bytes from the operating system's CSPRNG, made when the database is created
 (a key already stored is kept): the key for derived operation ids. All
 three are local operator state and never go into the ledger.
 
 So `operations.result` keeps a local copy of each completed side-effecting
-call's upstream result. It is masked (PII the detector found is
-pseudonymized, never raw), but it is still the tool's output, and with the
-vault it can be rehydrated. Protect the database like the vault: on unix a
+call's upstream result. By default it is the tool's raw output. Under
+`--transform pii` it is masked (PII the detector found is pseudonymized),
+but it is still the tool's output, and with the vault it can be rehydrated;
+a retry replays it rehydrated, so a proxy without `--transform pii` refuses
+to start on a database that holds masked results (including every result
+stored by 0.11, which always masked): start it with `--transform pii` and
+the same vault, or use a new `--operations-db`. Protect the database like the vault: on unix a
 new operations database (and its `<db>.lock`) is created with mode `0600`;
 keep it that way (`chmod 600` an existing one, which CloakPipe leaves as it
 finds it) and off shared or synced storage. Set a retention policy too: a

@@ -8,11 +8,16 @@
 //!
 //! ```sql
 //! operations(operation_id TEXT PRIMARY KEY, tool TEXT, call_digest BLOB,
-//!            state TEXT, result TEXT, updated_at TEXT)
+//!            state TEXT, result TEXT, updated_at TEXT, result_masked INTEGER)
 //! ```
 //!
-//! `call_digest` is the call's fingerprint and `result` the masked result
-//! JSON: local operator state, never ledger content. A one-row table
+//! `call_digest` is the call's fingerprint and `result` the result JSON the
+//! tool returned: local operator state, never ledger content.
+//! `result_masked` is 1 when the result was stored under the PII transform
+//! (`mcp-proxy --transform pii`), so it holds pseudonym tokens that only the
+//! vault can rehydrate. A row an earlier version wrote (that version always
+//! masked) has it NULL and counts as masked when it holds a result
+//! ([`OperationStore::masked_results`]). A one-row table
 //! `operation_id_key(id, key)` holds the database's random key for derived
 //! operation ids ([`OperationStore::operation_id_key`]).
 //!
@@ -86,8 +91,11 @@ pub struct OperationRow {
     pub tool: String,
     pub call_digest: [u8; 32],
     pub state: OperationState,
-    /// The masked result JSON of a `done` operation the gate saw complete.
+    /// The result JSON of a `done` operation the gate saw complete.
     pub result: Option<String>,
+    /// Whether `result` was stored under the PII transform (holds pseudonym
+    /// tokens): replaying it needs the vault.
+    pub result_masked: bool,
     /// RFC 3339 time of the last change.
     pub updated_at: String,
 }
@@ -97,9 +105,10 @@ pub struct OperationRow {
 pub enum Begin {
     /// New (or retryable) operation, now `in_flight`: forward the call.
     Forward,
-    /// Already `done`: answer with the stored (masked) result instead of
-    /// forwarding. `None` when an operator reconciled it as done.
-    Replay { result: Option<String> },
+    /// Already `done`: answer with the stored result instead of forwarding.
+    /// `None` when an operator reconciled it as done. `masked`: the result
+    /// holds pseudonym tokens (stored under the PII transform).
+    Replay { result: Option<String>, masked: bool },
     /// The operation id names a different call.
     Conflict,
     /// The operation is `in_flight` or `unknown`: an operator must
@@ -184,21 +193,29 @@ fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 
-const COLUMNS: &str = "operation_id, tool, call_digest, state, result, updated_at";
+const COLUMNS: &str = "operation_id, tool, call_digest, state, result, updated_at, result_masked";
 
-/// A raw table row: operation_id, tool, call_digest, state, result, updated_at.
-type RawRow = (String, String, Vec<u8>, String, Option<String>, String);
+/// Whether a stored result holds pseudonym tokens. A NULL flag is a row an
+/// earlier version wrote: it masked every call, so any result it stored is
+/// masked.
+const MASKED: &str = "(result IS NOT NULL AND (result_masked IS NULL OR result_masked = 1))";
+
+/// A raw table row: operation_id, tool, call_digest, state, result,
+/// updated_at, result_masked.
+type RawRow = (String, String, Vec<u8>, String, Option<String>, String, Option<bool>);
 
 fn row(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawRow> {
-    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
+    Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?))
 }
 
 fn to_row(raw: RawRow) -> Result<OperationRow, OperationsError> {
-    let (operation_id, tool, digest, state, result, updated_at) = raw;
+    let (operation_id, tool, digest, state, result, updated_at, masked) = raw;
     let call_digest: [u8; 32] = digest
         .try_into()
         .map_err(|_| OperationsError(format!("operation {operation_id}: call_digest is not 32 bytes")))?;
-    Ok(OperationRow { state: state.parse()?, operation_id, tool, call_digest, result, updated_at })
+    // See MASKED: an earlier version's stored result is masked.
+    let result_masked = result.is_some() && masked.unwrap_or(true);
+    Ok(OperationRow { state: state.parse()?, operation_id, tool, call_digest, result, updated_at, result_masked })
 }
 
 impl OperationStore {
@@ -228,13 +245,24 @@ impl OperationStore {
                 call_digest BLOB,
                 state TEXT,
                 result TEXT,
-                updated_at TEXT
+                updated_at TEXT,
+                result_masked INTEGER
             );
             CREATE TABLE IF NOT EXISTS operation_id_key (
                 id INTEGER PRIMARY KEY CHECK (id = 1),
                 key BLOB NOT NULL CHECK (length(key) = 32)
             );",
         )?;
+        // A database an earlier version made has no `result_masked`: add it,
+        // leaving it NULL on the existing rows (see MASKED).
+        let has_flag: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM pragma_table_info('operations') WHERE name = 'result_masked'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !has_flag {
+            conn.execute_batch("ALTER TABLE operations ADD COLUMN result_masked INTEGER")?;
+        }
         // A new database's key comes from the OS CSPRNG; a key already
         // stored (including one an earlier version made) is kept.
         let mut key = [0u8; 32];
@@ -326,19 +354,19 @@ impl OperationStore {
         let decision = match existing {
             None => {
                 tx.execute(
-                    "INSERT INTO operations (operation_id, tool, call_digest, state, result, updated_at)
-                     VALUES (?1, ?2, ?3, 'in_flight', NULL, ?4)",
+                    "INSERT INTO operations (operation_id, tool, call_digest, state, result, updated_at, result_masked)
+                     VALUES (?1, ?2, ?3, 'in_flight', NULL, ?4, 0)",
                     params![operation_id, tool, &call_digest[..], now()],
                 )?;
                 Begin::Forward
             }
             Some(r) if r.call_digest != *call_digest || r.tool != tool => Begin::Conflict,
             Some(r) => match r.state {
-                OperationState::Done => Begin::Replay { result: r.result },
+                OperationState::Done => Begin::Replay { masked: r.result_masked, result: r.result },
                 s @ (OperationState::InFlight | OperationState::Unknown) => Begin::ReconcileBeforeRetry(s),
                 OperationState::Failed | OperationState::NotApplied => {
                     tx.execute(
-                        "UPDATE operations SET state = 'in_flight', result = NULL, updated_at = ?2 WHERE operation_id = ?1",
+                        "UPDATE operations SET state = 'in_flight', result = NULL, result_masked = 0, updated_at = ?2 WHERE operation_id = ?1",
                         params![operation_id, now()],
                     )?;
                     Begin::Forward
@@ -349,18 +377,42 @@ impl OperationStore {
         Ok(decision)
     }
 
-    /// Settle an `in_flight` operation as `done` (with its masked result),
-    /// `failed` or `unknown`. Returns false when the operation is not
-    /// `in_flight` (absent, or already settled or reconciled): nothing changes.
+    /// Settle an `in_flight` operation as `done` (with its result, raw as
+    /// the tool returned it), `failed` or `unknown`. Returns false when the
+    /// operation is not `in_flight` (absent, or already settled or
+    /// reconciled): nothing changes.
     pub fn settle(&mut self, operation_id: &str, state: OperationState, result: Option<&str>) -> Result<bool, OperationsError> {
+        self.settle_with(operation_id, state, result, false)
+    }
+
+    /// [`Self::settle`] for a result stored under the PII transform: it holds
+    /// pseudonym tokens, and replaying it needs the vault.
+    pub fn settle_masked(&mut self, operation_id: &str, state: OperationState, result: Option<&str>) -> Result<bool, OperationsError> {
+        self.settle_with(operation_id, state, result, true)
+    }
+
+    fn settle_with(&mut self, operation_id: &str, state: OperationState, result: Option<&str>, masked: bool) -> Result<bool, OperationsError> {
         if !matches!(state, OperationState::Done | OperationState::Failed | OperationState::Unknown) {
             return Err(OperationsError(format!("cannot settle an operation as {state}")));
         }
         let changed = self.conn.execute(
-            "UPDATE operations SET state = ?2, result = ?3, updated_at = ?4 WHERE operation_id = ?1 AND state = 'in_flight'",
-            params![operation_id, state.as_str(), result, now()],
+            "UPDATE operations SET state = ?2, result = ?3, result_masked = ?4, updated_at = ?5
+             WHERE operation_id = ?1 AND state = 'in_flight'",
+            params![operation_id, state.as_str(), result, masked && result.is_some(), now()],
         )?;
         Ok(changed == 1)
+    }
+
+    /// The `done` operations whose stored result holds pseudonym tokens (from
+    /// the PII transform, or from an earlier version, which always masked),
+    /// by operation id. A retry replays that result, so a gate without the
+    /// vault must not run on this database.
+    pub fn masked_results(&self) -> Result<Vec<String>, OperationsError> {
+        let mut stmt = self
+            .conn
+            .prepare(&format!("SELECT operation_id FROM operations WHERE state = 'done' AND {MASKED} ORDER BY operation_id"))?;
+        let ids = stmt.query_map([], |r| r.get(0))?.collect::<rusqlite::Result<Vec<String>>>()?;
+        Ok(ids)
     }
 
     pub fn get(&self, operation_id: &str) -> Result<Option<OperationRow>, OperationsError> {
@@ -407,7 +459,7 @@ impl OperationStore {
         }
         evidence().map_err(ReconcileError::Evidence)?;
         tx.execute(
-            "UPDATE operations SET state = ?2, result = NULL, updated_at = ?3 WHERE operation_id = ?1",
+            "UPDATE operations SET state = ?2, result = NULL, result_masked = 0, updated_at = ?3 WHERE operation_id = ?1",
             params![operation_id, outcome.as_str(), now()],
         )?;
         tx.commit()?;

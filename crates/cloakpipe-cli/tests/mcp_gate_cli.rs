@@ -135,6 +135,9 @@ mod manifest_only {
         let names: Vec<&str> = seen.iter().map(|c| c["name"].as_str().unwrap()).collect();
         assert_eq!(names, ["lookup_ticket", "send_email"], "only the conforming calls reach the upstream: {seen:?}");
         assert!(!format!("{seen:?}").contains("evil.example"), "{seen:?}");
+        // The allowed email reaches the tool exactly as the agent sent it:
+        // the gate never rewrites an allowed call (no --transform pii).
+        assert_eq!(seen[1]["arguments"], email("dana@customer.example"), "{seen:?}");
         assert_eq!(refusal(&msgs, 1), None, "{msgs:?}");
         assert_eq!(refusal(&msgs, 2), None, "{msgs:?}");
 

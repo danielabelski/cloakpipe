@@ -22,6 +22,30 @@ may contain breaking changes; these are marked **Breaking**.
 
 ### Changed
 
+- **Breaking (`cloakpipe mcp-proxy`): PII masking is opt-in.** By default
+  the proxy forwards tool-call arguments and results unchanged: the gate
+  allows or refuses a call and never rewrites an allowed one, so a tool now
+  receives `dana@customer.example` where 0.11 sent `EMAIL_1`. No vault is
+  opened or keyed, and `CLOAKPIPE_VAULT_KEY` and the config file are not
+  read. `--transform pii` restores the 0.11 behaviour (pseudonymize PII in
+  arguments, rehydrate tokens in results, through the vault); users who
+  relied on masking must add it.
+- **Breaking (`cloakpipe mcp-proxy --operations-db`):** without
+  `--transform pii`, the proxy refuses to start (exit 1, naming
+  `--transform pii`) when the operations database holds `done` operations
+  whose stored results are masked, since a retry would replay pseudonym
+  tokens the agent cannot read. Every result 0.11 stored counts as masked.
+  Start with `--transform pii` and the vault the results were masked with
+  (the retry is replayed rehydrated, never re-executed), or use a new
+  `--operations-db`. The `operations` table gains a nullable
+  `result_masked INTEGER` column, added in place when an existing database
+  is opened.
+- **Breaking (`cloakpipe-mcp` API):** `ProxyContext { detector, vault, .. }`
+  is now `ProxyContext { pii: Option<PiiTransform>, .. }`, with
+  `PiiTransform { detector, vault }`. `Begin::Replay` carries `masked`,
+  `OperationRow` carries `result_masked`, and `OperationStore` gains
+  `settle_masked` and `masked_results`. Ledger hops of a proxy without the
+  transform record `ActionKind::Passthrough` instead of `Pseudonymize`.
 - **Breaking (`cloakpipe mcp-proxy`): the tool gate no longer requires a
   certification.** With `--manifest`, a call is allowed when the release
   declares the tool and the call passes the tool contracts the release binds
