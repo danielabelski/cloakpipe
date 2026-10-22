@@ -1,7 +1,7 @@
 //! Contract tests for `cloakpipe_mcp::gate` (see the module doc comment).
 
-use cloakpipe_cert::statement::{sign, statement, Certification, Envelope, TrustedKey, VerifyContext};
 use cloakpipe_mcp::{Denial, GateMode, ToolGate};
+use cloakpipe_receipt::dsse::TrustedKey;
 use cloakpipe_release::AgentRelease;
 use ed25519_dalek::SigningKey;
 use serde_json::json;
@@ -13,135 +13,174 @@ fn manifest() -> AgentRelease {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
-fn release() -> String {
-    manifest().manifest_hash().to_string()
-}
-
-fn key() -> SigningKey {
-    SigningKey::from_bytes(&[7u8; 32])
-}
-
-fn cert_for(release: &str, outcome: &str, environment: &str) -> Certification {
-    serde_json::from_value(json!({
-        "id": "cert-0001",
-        "release": release,
-        "agent": "support-agent",
-        "environment": environment,
-        "decision": {
-            "outcome": outcome,
-            "release": release,
-            "policy": {"name": "support-prod", "version": "11", "hash": format!("sha256:{}", "cd".repeat(32))},
-            "requiredSuites": [],
-            "runs": [{"runId": "run-1", "suite": "support-critical", "hash": format!("sha256:{}", "11".repeat(32))}],
-            "baselineRuns": [],
-            "summaries": [],
-            "reasons": if outcome == "blocked" {
-                json!([{"code": "pass_rate_below_minimum", "message": "pass rate 0.8 < 0.95"}])
-            } else { json!([]) }
-        },
-        "issuedAt": "2026-10-01T00:00:00Z",
-        "validUntil": "2026-10-31T00:00:00Z",
-        "issuer": "ci:acme/support"
-    }))
-    .unwrap()
-}
-
-fn envelope(c: &Certification) -> Envelope {
-    sign(&statement(c), &key(), "k1")
-}
-
-fn trust() -> VerifyContext {
-    VerifyContext {
-        trusted: vec![TrustedKey { keyid: "k1".into(), public_key: key().verifying_key().to_bytes() }],
-        ..Default::default()
-    }
-}
-
-fn gate(cert: Option<Envelope>) -> ToolGate {
-    ToolGate::new(GateMode::Enforce, &manifest(), "production", cert, trust())
-}
-
-fn certified() -> ToolGate {
-    gate(Some(envelope(&cert_for(&release(), "certified", "production"))))
+/// A gate over the release manifest alone: no certification involved.
+fn plain() -> ToolGate {
+    ToolGate::new(GateMode::Enforce, &manifest())
 }
 
 #[test]
-fn a_certified_release_may_call_its_declared_tools() {
-    let g = certified();
-    assert_eq!(g.release(), release());
+fn declared_call_allowed_without_certification() {
+    let g = plain();
+    assert_eq!(g.release(), manifest().manifest_hash().to_string());
     assert_eq!(g.check("refund", None, NOW), Ok(()));
     assert_eq!(g.check("lookup-customer", None, NOW), Ok(()));
 }
 
 #[test]
-fn undeclared_tools_are_refused() {
-    let g = certified();
+fn undeclared_tool_denied_without_certification() {
+    let g = plain();
     for tool in ["delete_customer", "refund@4", "tool:refund", "", "REFUND"] {
         assert_eq!(g.check(tool, None, NOW), Err(Denial::UndeclaredTool), "{tool:?}");
     }
 }
 
 #[test]
-fn without_a_certification_every_call_is_refused() {
-    assert_eq!(gate(None).check("refund", None, NOW), Err(Denial::Uncertified));
-}
-
-#[test]
-fn the_certification_must_verify_now() {
-    let g = certified();
-    assert_eq!(g.check("refund", None, "2026-10-31T00:00:00Z"), Err(Denial::NotCertified("expired".into())));
-    assert_eq!(g.check("refund", None, "2026-09-30T00:00:00Z"), Err(Denial::NotCertified("invalid".into())), "not yet valid is INVALID in the verify contract");
-    assert_eq!(g.check("refund", None, "not a time"), Err(Denial::NotCertified("invalid".into())));
-}
-
-#[test]
-fn revoked_untrusted_and_foreign_certifications_are_refused() {
-    let c = cert_for(&release(), "certified", "production");
-    let env = envelope(&c);
-
-    let mut revoked = trust();
-    let digest = {
-        use base64::prelude::*;
-        use sha2::Digest;
-        hex::encode(sha2::Sha256::digest(BASE64_STANDARD.decode(&env.payload).unwrap()))
-    };
-    revoked.revoked_statements.insert(digest);
-    let g = ToolGate::new(GateMode::Enforce, &manifest(), "production", Some(env.clone()), revoked);
-    assert_eq!(g.check("refund", None, NOW), Err(Denial::NotCertified("revoked".into())));
-
-    let untrusted = ToolGate::new(GateMode::Enforce, &manifest(), "production", Some(env), VerifyContext::default());
-    assert_eq!(untrusted.check("refund", None, NOW), Err(Denial::NotCertified("invalid".into())));
-
-    // A valid certification of another release.
-    let other = format!("sha256:{}", "ab".repeat(32));
-    let g = gate(Some(envelope(&cert_for(&other, "certified", "production"))));
-    assert_eq!(g.check("refund", None, NOW), Err(Denial::NotCertified("invalid".into())));
-}
-
-#[test]
-fn a_blocked_decision_does_not_certify() {
-    let g = gate(Some(envelope(&cert_for(&release(), "blocked", "production"))));
-    assert_eq!(g.check("refund", None, NOW), Err(Denial::NotCertified("blocked".into())));
-}
-
-#[test]
-fn the_certification_must_cover_the_environment() {
-    let g = gate(Some(envelope(&cert_for(&release(), "certified", "staging"))));
-    assert_eq!(g.check("refund", None, NOW), Err(Denial::WrongEnvironment("staging".into())));
-}
-
-#[test]
-fn undeclared_is_checked_before_certification() {
-    // An undeclared tool is refused for that reason even without a certification.
-    assert_eq!(gate(None).check("delete_customer", None, NOW), Err(Denial::UndeclaredTool));
-}
-
-#[test]
 fn denial_codes_are_stable() {
     assert_eq!(Denial::UndeclaredTool.code(), "undeclared_tool");
-    assert_eq!(Denial::Uncertified.code(), "uncertified");
-    assert_eq!(Denial::NotCertified("revoked".into()).code(), "revoked");
-    assert_eq!(Denial::WrongEnvironment("staging".into()).code(), "wrong_environment");
+}
+
+// ── legacy: certification requirement (`certification` feature) ─────────
+
+#[cfg(feature = "certification")]
+mod certification {
+    use super::*;
+    use cloakpipe_cert::statement::{sign, statement, Certification, Envelope, VerifyContext};
+
+    fn release() -> String {
+        manifest().manifest_hash().to_string()
+    }
+
+    fn key() -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32])
+    }
+
+    fn cert_for(release: &str, outcome: &str, environment: &str) -> Certification {
+        serde_json::from_value(json!({
+            "id": "cert-0001",
+            "release": release,
+            "agent": "support-agent",
+            "environment": environment,
+            "decision": {
+                "outcome": outcome,
+                "release": release,
+                "policy": {"name": "support-prod", "version": "11", "hash": format!("sha256:{}", "cd".repeat(32))},
+                "requiredSuites": [],
+                "runs": [{"runId": "run-1", "suite": "support-critical", "hash": format!("sha256:{}", "11".repeat(32))}],
+                "baselineRuns": [],
+                "summaries": [],
+                "reasons": if outcome == "blocked" {
+                    json!([{"code": "pass_rate_below_minimum", "message": "pass rate 0.8 < 0.95"}])
+                } else { json!([]) }
+            },
+            "issuedAt": "2026-10-01T00:00:00Z",
+            "validUntil": "2026-10-31T00:00:00Z",
+            "issuer": "ci:acme/support"
+        }))
+        .unwrap()
+    }
+
+    fn envelope(c: &Certification) -> Envelope {
+        sign(&statement(c), &key(), "k1")
+    }
+
+    fn trust() -> VerifyContext {
+        VerifyContext {
+            trusted: vec![TrustedKey { keyid: "k1".into(), public_key: key().verifying_key().to_bytes() }],
+            ..Default::default()
+        }
+    }
+
+    fn gate(cert: Option<Envelope>) -> ToolGate {
+        ToolGate::new(GateMode::Enforce, &manifest()).with_certification("production", cert, trust())
+    }
+
+    fn certified() -> ToolGate {
+        gate(Some(envelope(&cert_for(&release(), "certified", "production"))))
+    }
+
+    #[test]
+    fn a_certified_release_may_call_its_declared_tools() {
+        let g = certified();
+        assert_eq!(g.release(), release());
+        assert_eq!(g.check("refund", None, NOW), Ok(()));
+        assert_eq!(g.check("lookup-customer", None, NOW), Ok(()));
+    }
+
+    #[test]
+    fn without_a_certification_every_call_is_refused() {
+        assert_eq!(gate(None).check("refund", None, NOW), Err(Denial::Uncertified));
+    }
+
+    #[test]
+    fn the_certification_must_verify_now() {
+        let g = certified();
+        assert_eq!(g.check("refund", None, "2026-10-31T00:00:00Z"), Err(Denial::NotCertified("expired".into())));
+        assert_eq!(g.check("refund", None, "2026-09-30T00:00:00Z"), Err(Denial::NotCertified("invalid".into())), "not yet valid is INVALID in the verify contract");
+        assert_eq!(g.check("refund", None, "not a time"), Err(Denial::NotCertified("invalid".into())));
+    }
+
+    #[test]
+    fn revoked_untrusted_and_foreign_certifications_are_refused() {
+        let c = cert_for(&release(), "certified", "production");
+        let env = envelope(&c);
+
+        let mut revoked = trust();
+        let digest = {
+            use base64::prelude::*;
+            use sha2::Digest;
+            hex::encode(sha2::Sha256::digest(BASE64_STANDARD.decode(&env.payload).unwrap()))
+        };
+        revoked.revoked_statements.insert(digest);
+        let g = ToolGate::new(GateMode::Enforce, &manifest()).with_certification("production", Some(env.clone()), revoked);
+        assert_eq!(g.check("refund", None, NOW), Err(Denial::NotCertified("revoked".into())));
+
+        let untrusted = ToolGate::new(GateMode::Enforce, &manifest()).with_certification("production", Some(env), VerifyContext::default());
+        assert_eq!(untrusted.check("refund", None, NOW), Err(Denial::NotCertified("invalid".into())));
+
+        // A valid certification of another release.
+        let other = format!("sha256:{}", "ab".repeat(32));
+        let g = gate(Some(envelope(&cert_for(&other, "certified", "production"))));
+        assert_eq!(g.check("refund", None, NOW), Err(Denial::NotCertified("invalid".into())));
+    }
+
+    #[test]
+    fn a_blocked_decision_does_not_certify() {
+        let g = gate(Some(envelope(&cert_for(&release(), "blocked", "production"))));
+        assert_eq!(g.check("refund", None, NOW), Err(Denial::NotCertified("blocked".into())));
+    }
+
+    #[test]
+    fn the_certification_must_cover_the_environment() {
+        let g = gate(Some(envelope(&cert_for(&release(), "certified", "staging"))));
+        assert_eq!(g.check("refund", None, NOW), Err(Denial::WrongEnvironment("staging".into())));
+    }
+
+    #[test]
+    fn undeclared_is_checked_before_certification() {
+        // An undeclared tool is refused for that reason even without a certification.
+        assert_eq!(gate(None).check("delete_customer", None, NOW), Err(Denial::UndeclaredTool));
+    }
+
+    #[test]
+    fn certification_denial_codes_are_stable() {
+        assert_eq!(Denial::Uncertified.code(), "uncertified");
+        assert_eq!(Denial::NotCertified("revoked".into()).code(), "revoked");
+        assert_eq!(Denial::WrongEnvironment("staging".into()).code(), "wrong_environment");
+    }
+
+    #[test]
+    fn release_checks_come_before_argument_checks() {
+        use cloakpipe_release::contract::ToolContract;
+        use cloakpipe_release::{parse_path, ArtifactRef, Format};
+        let example = |n: &str| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/action-boundary").join(n);
+        let src = std::fs::read_to_string(example("crm-tools.contract.yaml")).unwrap().replace("sideEffect: true", "sideEffect: false").replace("requiresApproval: true", "requiresApproval: false");
+        let c = ToolContract::parse_str(&src, Format::Yaml).unwrap();
+        let mut m = parse_path(&example("release.yaml")).unwrap();
+        m.spec.policies.retain(|p| !p.reference.starts_with("policy:tool-contract/"));
+        m.spec.policies.push(ArtifactRef { reference: c.policy_ref() });
+        let uncertified = ToolGate::new(GateMode::Enforce, &m).with_certification("production", None, trust()).with_contracts(vec![c], None).unwrap();
+        assert_eq!(uncertified.check("crm.patch", Some(&json!({"x": 1})), NOW), Err(Denial::Uncertified));
+    }
 }
 
 // ── tool contracts: argument-level rules ────────────────────────────────
@@ -178,14 +217,13 @@ mod contracts {
         serde_json::from_str(&std::fs::read_to_string(example("task-context.json")).unwrap()).unwrap()
     }
 
-    fn certified_for(m: &AgentRelease) -> ToolGate {
-        let cert = envelope(&cert_for(&m.manifest_hash().to_string(), "certified", "production"));
-        ToolGate::new(GateMode::Enforce, m, "production", Some(cert), trust())
+    fn gate_for(m: &AgentRelease) -> ToolGate {
+        ToolGate::new(GateMode::Enforce, m)
     }
 
     fn gate_with(task: Option<Value>) -> ToolGate {
         let c = contract(false, false);
-        certified_for(&release_binding(&[&c])).with_contracts(vec![c], task).unwrap()
+        gate_for(&release_binding(&[&c])).with_contracts(vec![c], task).unwrap()
     }
 
     fn args() -> Value {
@@ -237,10 +275,6 @@ mod contracts {
 
     #[test]
     fn release_checks_come_before_argument_checks() {
-        let c = contract(false, false);
-        let m = release_binding(&[&c]);
-        let uncertified = ToolGate::new(GateMode::Enforce, &m, "production", None, trust()).with_contracts(vec![c], None).unwrap();
-        assert_eq!(uncertified.check("crm.patch", Some(&json!({"x": 1})), NOW), Err(Denial::Uncertified));
         assert_eq!(gate_with(None).check("crm.delete", Some(&args()), NOW), Err(Denial::UndeclaredTool));
     }
 
@@ -252,7 +286,7 @@ mod contracts {
     #[test]
     fn a_tool_that_requires_approval_is_refused_without_a_receipt() {
         let c = contract(false, true);
-        let g = certified_for(&release_binding(&[&c])).with_contracts(vec![c], Some(task())).unwrap();
+        let g = gate_for(&release_binding(&[&c])).with_contracts(vec![c], Some(task())).unwrap();
         assert_eq!(g.check("crm.patch", Some(&args()), NOW), Err(Denial::ApprovalRequired));
         // Arguments are checked first.
         assert_eq!(
@@ -270,7 +304,7 @@ mod contracts {
         )
         .unwrap();
         let m = release_binding(&[&bound]);
-        let err = certified_for(&m).with_contracts(vec![other.clone()], Some(task())).err().expect("refused");
+        let err = gate_for(&m).with_contracts(vec![other.clone()], Some(task())).err().expect("refused");
         assert!(matches!(&err, GateConfigError::NotInRelease { policy_ref } if *policy_ref == other.policy_ref()), "{err}");
         assert!(err.to_string().contains(&other.policy_ref()), "the message names the digest to bind: {err}");
     }
@@ -279,10 +313,10 @@ mod contracts {
     fn a_contract_the_release_binds_but_was_not_supplied_refuses_to_start() {
         let c = contract(false, false);
         let m = release_binding(&[&c]);
-        let err = certified_for(&m).with_contracts(vec![], Some(task())).err().expect("refused");
+        let err = gate_for(&m).with_contracts(vec![], Some(task())).err().expect("refused");
         assert!(matches!(&err, GateConfigError::NotSupplied { policy_ref } if *policy_ref == c.policy_ref()), "{err}");
         // A library caller that never supplies contracts gets every call refused.
-        assert_eq!(certified_for(&m).check("crm.lookup", None, NOW), Err(Denial::ContractMissing));
+        assert_eq!(gate_for(&m).check("crm.lookup", None, NOW), Err(Denial::ContractMissing));
     }
 
     #[test]
@@ -294,7 +328,7 @@ mod contracts {
         )
         .unwrap();
         let m = release_binding(&[&a, &b]);
-        let err = certified_for(&m).with_contracts(vec![a, b], None).err().expect("refused");
+        let err = gate_for(&m).with_contracts(vec![a, b], None).err().expect("refused");
         assert!(matches!(&err, GateConfigError::AmbiguousTool { tool } if tool == "crm.patch"), "{err}");
     }
 
@@ -302,7 +336,7 @@ mod contracts {
     fn side_effect_tools_need_an_operations_store() {
         let c = contract(true, false);
         let m = release_binding(&[&c]);
-        let g = certified_for(&m).with_contracts(vec![c.clone()], Some(task())).unwrap();
+        let g = gate_for(&m).with_contracts(vec![c.clone()], Some(task())).unwrap();
         assert!(!g.has_operations());
         let err = g.ready().expect_err("not ready without an operations store");
         assert!(matches!(&err, GateConfigError::OperationsRequired { tool } if tool == "crm.patch"), "{err}");
@@ -310,7 +344,7 @@ mod contracts {
 
         let dir = tempfile::tempdir().unwrap();
         let store = cloakpipe_mcp::operations::OperationStore::open(dir.path().join("ops.db")).unwrap();
-        let g = certified_for(&m).with_contracts(vec![c], Some(task())).unwrap().with_operations(store).unwrap();
+        let g = gate_for(&m).with_contracts(vec![c], Some(task())).unwrap().with_operations(store).unwrap();
         assert!(g.has_operations());
         assert!(g.ready().is_ok());
         // A gate with no side-effect tool needs no store.
@@ -325,7 +359,7 @@ mod contracts {
         let dir = tempfile::tempdir().unwrap();
         let open = || cloakpipe_mcp::operations::OperationStore::open(dir.path().join("ops.db")).unwrap();
         let key = open().operation_id_key().unwrap();
-        let g = certified_for(&m).with_contracts(vec![c.clone()], Some(task())).unwrap().with_operations(open()).unwrap();
+        let g = gate_for(&m).with_contracts(vec![c.clone()], Some(task())).unwrap().with_operations(open()).unwrap();
         let auth = g.authorize("crm.patch", Some(&args()), NOW).unwrap();
         let op = auth.operation.expect("a side-effect call is an operation");
         let fp = fingerprint(&m.manifest_hash(), "crm.patch", &args());
@@ -333,7 +367,7 @@ mod contracts {
         // Keyed by the operations database's own key.
         assert_eq!(op.operation_id, derive_operation_id(&key, "t-981", &fp));
         // Without an operations store there is no key: no operation can be named.
-        let bare = certified_for(&m).with_contracts(vec![c], Some(task())).unwrap();
+        let bare = gate_for(&m).with_contracts(vec![c], Some(task())).unwrap();
         assert_eq!(bare.check("crm.patch", Some(&args()), NOW), Err(Denial::OperationsUnavailable));
         assert!(auth.approval.is_none());
         // Same call, same operation; another call, another operation.
@@ -350,7 +384,7 @@ mod contracts {
         let m = release_binding(&[&c]);
         let mut t = task();
         t.as_object_mut().unwrap().remove("taskId");
-        let g = certified_for(&m).with_contracts(vec![c], Some(t)).unwrap();
+        let g = gate_for(&m).with_contracts(vec![c], Some(t)).unwrap();
         assert_eq!(g.check("crm.patch", Some(&args()), NOW), Err(Denial::TaskContextMissing { path: None }));
     }
 
@@ -370,15 +404,15 @@ mod contracts {
     fn the_task_context_must_be_an_object() {
         let c = contract(false, false);
         let m = release_binding(&[&c]);
-        let err = certified_for(&m).with_contracts(vec![c], Some(json!(["demo-co"]))).err().expect("refused");
+        let err = gate_for(&m).with_contracts(vec![c], Some(json!(["demo-co"]))).err().expect("refused");
         assert!(matches!(err, GateConfigError::TaskContextNotObject), "{err}");
     }
 
     #[test]
     fn a_release_without_contracts_is_unchanged() {
-        let g = certified().with_contracts(vec![], None).unwrap();
+        let g = plain().with_contracts(vec![], None).unwrap();
         assert_eq!(g.check("refund", Some(&json!({"anything": 1})), NOW), Ok(()));
-        assert_eq!(certified().check("refund", Some(&json!({"anything": 1})), NOW), Ok(()));
+        assert_eq!(plain().check("refund", Some(&json!({"anything": 1})), NOW), Ok(()));
     }
 
     #[test]
@@ -442,11 +476,10 @@ mod approvals {
         vec![TrustedKey { keyid: "approver-1".into(), public_key: approver().verifying_key().to_bytes() }]
     }
 
-    /// A certified gate for the example release with approvals read from `dir`.
+    /// A gate for the example release with approvals read from `dir`.
     fn gate_in(dir: &Path, task: Option<Value>) -> ToolGate {
         let m = manifest();
-        let cert = envelope(&cert_for(&m.manifest_hash().to_string(), "certified", "production"));
-        ToolGate::new(GateMode::Enforce, &m, "production", Some(cert), trust())
+        ToolGate::new(GateMode::Enforce, &m)
             .with_contracts(vec![contract()], task)
             .unwrap()
             .with_approvals(dir, approvers())
@@ -510,8 +543,7 @@ mod approvals {
         let fp = fingerprint(&m.manifest_hash(), "crm.patch", &args());
         let a = Approval { release: m.manifest_hash().to_string(), ..approval() };
         file_receipt(dir.path(), &a, &approver(), &fp, &fp);
-        let cert = envelope(&cert_for(&m.manifest_hash().to_string(), "certified", "production"));
-        let g = ToolGate::new(GateMode::Enforce, &m, "production", Some(cert), trust())
+        let g = ToolGate::new(GateMode::Enforce, &m)
             .with_contracts(vec![full], Some(task()))
             .unwrap()
             .with_approvals(dir.path(), approvers());
@@ -592,8 +624,7 @@ mod approvals {
     #[test]
     fn without_approvals_configured_every_approval_gated_call_is_refused() {
         let m = manifest();
-        let cert = envelope(&cert_for(&m.manifest_hash().to_string(), "certified", "production"));
-        let g = ToolGate::new(GateMode::Enforce, &m, "production", Some(cert), trust())
+        let g = ToolGate::new(GateMode::Enforce, &m)
             .with_contracts(vec![contract()], Some(task()))
             .unwrap();
         assert_eq!(g.check("crm.patch", Some(&args()), NOW), Err(Denial::ApprovalRequired));

@@ -94,6 +94,17 @@ fn approve(dir: &Path, release: &str, key: &str, arguments: &Value, extra: &[&st
     serde_json::from_str(&run_ok(dir, &a)).unwrap()
 }
 
+/// The gate's certification flags. Only the legacy `certification` build has
+/// them (and refuses calls without a certification); the default gate runs on
+/// the release manifest alone.
+fn cert_flags(cert: &str, trust: &str) -> Vec<String> {
+    if cfg!(feature = "certification") {
+        vec!["--certification".into(), cert.into(), "--trust".into(), trust.into()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// A fake tool: records each line, answers with an empty result for its id.
 fn upstream(dir: &Path) -> (String, PathBuf) {
     let received = dir.join("received.jsonl");
@@ -180,14 +191,14 @@ fn world() -> World {
 
 impl World {
     fn gate(&self, approver_key: &str) -> Vec<String> {
-        [
-            "--manifest", &self.release, "--certification", &self.cert, "--trust", &self.trust,
+        let rest: Vec<String> = [
             "--tool-contract", &self.contract, "--task-context", &example("task-context.json"),
             "--approvals", &p(self.dir.path(), "approvals"), "--approver-key", approver_key,
         ]
         .iter()
         .map(|s| s.to_string())
-        .collect()
+        .collect();
+        [vec!["--manifest".to_string(), self.release.clone()], cert_flags(&self.cert, &self.trust), rest].concat()
     }
 
     fn run(&self, approver_key: &str, lines: &[String]) -> Proxy {
@@ -331,7 +342,8 @@ fn approval_flags_must_come_together_and_need_a_manifest() {
     let w = world();
     let dir = p(w.dir.path(), "approvals");
     std::fs::create_dir_all(&dir).unwrap();
-    let base = ["--manifest", w.release.as_str(), "--certification", &w.cert, "--trust", &w.trust, "--tool-contract", &w.contract];
+    let base = [vec!["--manifest".to_string(), w.release.clone()], cert_flags(&w.cert, &w.trust), vec!["--tool-contract".into(), w.contract.clone()]].concat();
+    let base: Vec<&str> = base.iter().map(String::as_str).collect();
     for flags in [
         [&base[..], &["--approvals", dir.as_str()]].concat(),
         [&base[..], &["--approver-key", w.approver.as_str()]].concat(),

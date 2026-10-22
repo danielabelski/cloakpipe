@@ -2,12 +2,10 @@
 //! upstream tool, the agent gets a JSON-RPC error for them, and the refusal
 //! is evidence bound to the release.
 
-use cloakpipe_cert::statement::{sign, statement, Certification, TrustedKey, VerifyContext};
 use cloakpipe_core::{config::DetectionConfig, detector::Detector, vault::Vault};
 use cloakpipe_ledger::{ActionKind, LedgerStore, MetadataValue};
 use cloakpipe_mcp::{run_proxy_io, stable_ids, GateMode, ProxyContext, ToolGate};
 use cloakpipe_release::AgentRelease;
-use ed25519_dalek::SigningKey;
 use serde_json::{json, Value};
 use std::io::{Cursor, Write};
 use std::sync::{Arc, Mutex};
@@ -62,31 +60,9 @@ fn manifest() -> AgentRelease {
     serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
 }
 
-fn certified_gate(mode: GateMode) -> ToolGate {
-    let m = manifest();
-    let release = m.manifest_hash().to_string();
-    let now = chrono::Utc::now();
-    let c: Certification = serde_json::from_value(json!({
-        "id": "cert-e2e",
-        "release": release,
-        "environment": "production",
-        "decision": {
-            "outcome": "certified", "release": release,
-            "policy": {"name": "p", "version": "1", "hash": format!("sha256:{}", "cd".repeat(32))},
-            "requiredSuites": [], "runs": [{"runId": "r", "suite": "s", "hash": format!("sha256:{}", "11".repeat(32))}],
-            "baselineRuns": [], "summaries": [], "reasons": []
-        },
-        "issuedAt": (now - chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "validUntil": (now + chrono::Duration::days(30)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "issuer": "test"
-    }))
-    .unwrap();
-    let key = SigningKey::from_bytes(&[7u8; 32]);
-    let trust = VerifyContext {
-        trusted: vec![TrustedKey { keyid: "k1".into(), public_key: key.verifying_key().to_bytes() }],
-        ..Default::default()
-    };
-    ToolGate::new(mode, &m, "production", Some(sign(&statement(&c), &key, "k1")), trust)
+/// A gate over the release manifest alone (no certification).
+fn manifest_gate(mode: GateMode) -> ToolGate {
+    ToolGate::new(mode, &manifest())
 }
 
 fn call(id: u64, tool: &str) -> String {
@@ -117,7 +93,7 @@ fn run(gate: ToolGate, lines: &[String]) -> (Capture, String, Vec<cloakpipe_ledg
 #[test]
 fn refused_calls_never_reach_the_tool() {
     let lines = [call(1, "refund"), call(2, "delete_customer"), json!({"jsonrpc": "2.0", "id": 3, "method": "tools/list"}).to_string()];
-    let (out, seen, records, release) = run(certified_gate(GateMode::Enforce), &lines);
+    let (out, seen, records, release) = run(manifest_gate(GateMode::Enforce), &lines);
 
     assert!(seen.contains("\"refund\""), "the declared tool was called: {seen}");
     assert!(!seen.contains("delete_customer"), "the refused call reached the tool: {seen}");
@@ -139,7 +115,7 @@ fn refused_calls_never_reach_the_tool() {
 
 #[test]
 fn warn_mode_forwards_and_records_the_violation() {
-    let (out, seen, records, _) = run(certified_gate(GateMode::Warn), &[call(2, "delete_customer")]);
+    let (out, seen, records, _) = run(manifest_gate(GateMode::Warn), &[call(2, "delete_customer")]);
     assert!(seen.contains("delete_customer"), "warn mode forwards: {seen}");
     assert!(out.messages().iter().all(|m| m.get("error").is_none()));
     let flagged: Vec<_> = records.iter().filter(|r| r.metadata.contains_key("gate_violation")).collect();
@@ -152,7 +128,7 @@ fn warn_mode_forwards_and_records_the_violation() {
 fn a_refused_call_without_an_id_gets_no_reply() {
     // JSON-RPC notifications have no id and take no response.
     let note = json!({"jsonrpc": "2.0", "method": "tools/call", "params": {"name": "delete_customer"}}).to_string();
-    let (out, seen, _, _) = run(certified_gate(GateMode::Enforce), &[note]);
+    let (out, seen, _, _) = run(manifest_gate(GateMode::Enforce), &[note]);
     assert!(!seen.contains("delete_customer"));
     assert!(out.messages().is_empty());
 }
@@ -180,7 +156,7 @@ fn smuggling_attempts() -> Vec<(&'static str, String)> {
 #[test]
 fn unreadable_or_noncanonical_messages_are_refused_not_forwarded() {
     for (what, line) in smuggling_attempts() {
-        let (out, seen, records, _) = run(certified_gate(GateMode::Enforce), std::slice::from_ref(&line));
+        let (out, seen, records, _) = run(manifest_gate(GateMode::Enforce), std::slice::from_ref(&line));
         assert!(!seen.contains("delete_customer"), "{what}: forwarded to the tool: {seen}");
         let msgs = out.messages();
         assert_eq!(msgs.len(), 1, "{what}: one error back to the agent: {msgs:?}");
@@ -196,14 +172,14 @@ fn unreadable_or_noncanonical_messages_are_refused_not_forwarded() {
 fn warn_mode_does_not_forward_what_it_cannot_read_either() {
     // Warn mode reports policy violations, but a message the gate cannot
     // check is never forwarded unchecked.
-    let (_, seen, _, _) = run(certified_gate(GateMode::Warn), &[format!("[{}]", call(9, "delete_customer"))]);
+    let (_, seen, _, _) = run(manifest_gate(GateMode::Warn), &[format!("[{}]", call(9, "delete_customer"))]);
     assert!(!seen.contains("delete_customer"), "{seen}");
 }
 
 #[test]
 fn a_refused_request_with_a_null_id_is_answered() {
     let line = json!({"jsonrpc": "2.0", "id": null, "method": "tools/call", "params": {"name": "delete_customer"}}).to_string();
-    let (out, seen, _, _) = run(certified_gate(GateMode::Enforce), &[line]);
+    let (out, seen, _, _) = run(manifest_gate(GateMode::Enforce), &[line]);
     assert!(!seen.contains("delete_customer"));
     let msgs = out.messages();
     assert_eq!(msgs.len(), 1, "{msgs:?}");
@@ -217,7 +193,7 @@ fn ordinary_messages_still_flow_with_a_gate() {
         json!({"jsonrpc": "2.0", "method": "notifications/initialized"}).to_string(),
         call(2, "refund"),
     ];
-    let (_, seen, _, _) = run(certified_gate(GateMode::Enforce), &lines);
+    let (_, seen, _, _) = run(manifest_gate(GateMode::Enforce), &lines);
     for needle in ["initialize", "notifications/initialized", "\"refund\""] {
         assert!(seen.contains(needle), "{needle}: {seen}");
     }

@@ -1,0 +1,25 @@
+# Tool contract for the support agent (Example 2): what each tool call may
+# carry. Closed by default: a tool argument not listed here is refused.
+#
+# The release binds this contract by digest in spec.policies
+# (policy:tool-contract/support-tools@sha256:<digest>). Edit this file and the
+# digest changes: `cloakpipe mcp-proxy` then refuses to start and prints the
+# new reference to put in release.yaml.
+apiVersion: cloakpipe.co/v1alpha1
+kind: ToolContract
+metadata:
+  name: support-tools
+spec:
+  tools:
+    lookup_ticket:
+      arguments:
+        ticket_id: { bindTo: task.ticket_id }
+      required: [ticket_id]
+    send_email:
+      arguments:
+        # The recipient must be the customer on the ticket being worked,
+        # taken from the trusted task context, never from the model.
+        to: { bindTo: task.customer_email }
+        subject: { type: string, maxLength: 200 }
+        body: { type: string, maxLength: 4000 }
+      required: [to, subject, body]

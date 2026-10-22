@@ -1,0 +1,17 @@
+# The support agent's release (Example 2), in the legacy AgentRelease format.
+#
+# The gate reads two things from it: the tools the agent may call
+# (spec.tools; anything else is refused as undeclared_tool) and the tool
+# contract it binds by digest (spec.policies). Code, prompt, model and
+# runtime pins are optional for the gate, so none are given here.
+apiVersion: cloakpipe.co/v1alpha1
+kind: AgentRelease
+metadata:
+  agent: support-agent
+  version: "1"
+spec:
+  tools:
+    - ref: tool:lookup_ticket@1
+    - ref: tool:send_email@1
+  policies:
+    - ref: policy:tool-contract/support-tools@sha256:0000000000000000000000000000000000000000000000000000000000000000
