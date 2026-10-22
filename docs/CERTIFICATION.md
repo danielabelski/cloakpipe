@@ -387,8 +387,17 @@ the fixtures in `crates/cloakpipe-cli/tests/fixtures/certification/`.
 
 ## Runtime: the MCP tool gate
 
-`cloakpipe mcp-proxy` enforces certification where an agent acts: its tool
-calls. With `--manifest`, each `tools/call` passes only if
+> **Since 0.12 this runtime certification check is a legacy, source-only
+> cargo feature (`certification`, off by default).** Default builds of
+> `cloakpipe mcp-proxy` gate on the release manifest and its tool contracts
+> alone and do not accept the `--certification`, `--trust`, `--trust-key`,
+> `--revoked-statement`, `--revoked-key` or `--environment` flags. Build with
+> `cargo build -p cloakpipe-cli --features certification` for the behaviour
+> below. See [ACTION_BOUNDARY.md](ACTION_BOUNDARY.md).
+
+With the `certification` feature, `cloakpipe mcp-proxy` enforces
+certification where an agent acts: its tool calls. With `--manifest`, each
+`tools/call` passes only if
 
 1. the tool is declared in the manifest's `spec.tools` (`tool:refund@4`
    declares `refund`), and

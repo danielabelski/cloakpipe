@@ -46,12 +46,19 @@ pub struct Metadata {
     pub labels: BTreeMap<String, String>,
 }
 
+/// `code`, `prompts`, `model` and `runtime` pin the release for
+/// certification ([`AgentRelease::validate`]). The tool gate does not need
+/// them ([`AgentRelease::gate_issues`]), so they may be left out; an omitted
+/// field reads as empty, which `validate` reports.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Spec {
+    #[serde(default)]
     pub code: Code,
     /// Ordered: prompt composition order is semantic.
+    #[serde(default)]
     pub prompts: Vec<ArtifactRef>,
+    #[serde(default)]
     pub model: ArtifactRef,
     #[serde(default)]
     pub parameters: BTreeMap<String, Value>,
@@ -63,6 +70,7 @@ pub struct Spec {
     pub retrieval: Option<ArtifactRef>,
     #[serde(default)]
     pub policies: Vec<ArtifactRef>,
+    #[serde(default)]
     pub runtime: Runtime,
     #[serde(default)]
     pub dependencies: Vec<Dependency>,
@@ -70,21 +78,21 @@ pub struct Spec {
     pub feature_flags: BTreeMap<String, Value>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Code {
     pub repository: String,
     pub commit: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ArtifactRef {
     #[serde(rename = "ref")]
     pub reference: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Runtime {
     pub image: String,

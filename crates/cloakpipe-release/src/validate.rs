@@ -127,6 +127,35 @@ impl AgentRelease {
 
         v.issues
     }
+
+    /// What the tool gate needs to read the release: a known `apiVersion`
+    /// and `kind`, a valid agent name, and well-formed, distinct `tool:`
+    /// references (`spec.tools`, which the gate allows by name) and
+    /// `policy:` references (`spec.policies`, which bind tool contracts by
+    /// digest). An empty result means the gate can run on this release.
+    ///
+    /// Unlike [`Self::validate`] it does not require the code, prompt, model
+    /// and runtime pins: those make a release certifiable, and the gate does
+    /// not depend on them.
+    pub fn gate_issues(&self) -> Vec<Issue> {
+        let mut v = Validator::default();
+        if !namespace::is_known_api_version(&self.api_version) {
+            v.push(
+                IssueCode::UnsupportedApiVersion,
+                "apiVersion",
+                format!("expected {API_VERSION} (or legacy {}), got {:?}", namespace::LEGACY_API_VERSION, self.api_version),
+            );
+        }
+        if self.kind != KIND {
+            v.push(IssueCode::UnsupportedKind, "kind", format!("expected {KIND}, got {:?}", self.kind));
+        }
+        if !is_valid_name(&self.metadata.agent) {
+            v.push(IssueCode::InvalidName, "metadata.agent", "must be lowercase [a-z0-9._/-]".into());
+        }
+        v.set("spec.tools", &self.spec.tools, RefKind::Tool);
+        v.set("spec.policies", &self.spec.policies, RefKind::Policy);
+        v.issues
+    }
 }
 
 #[derive(Default)]

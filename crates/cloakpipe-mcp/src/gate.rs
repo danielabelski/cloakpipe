@@ -1,17 +1,17 @@
 //! Runtime tool gate (Phase C): may this Agent Release call this tool now?
 //!
 //! The MCP interceptor asks [`ToolGate::check`] before forwarding each
-//! `tools/call`. A call is allowed only when
-//!
-//! 1. the tool is declared in the release manifest (`spec.tools`, by name:
-//!    `tool:refund@4` declares `refund`), and
-//! 2. the release holds a certification that verifies offline *now*
-//!    ([`cloakpipe_cert::statement::verify`]: trusted signer, not revoked,
-//!    inside its validity window, about this release, `certified` decision)
-//!    for the gate's environment.
-//!
-//! Without a certification every call is refused: the gate fails closed.
+//! `tools/call`. A call is allowed only when the tool is declared in the
+//! release manifest (`spec.tools`, by name: `tool:refund@4` declares
+//! `refund`) and passes the tool contract that covers it, if any (below).
 //! `warn` mode reports the same verdicts but lets calls through.
+//!
+//! Legacy, `certification` cargo feature only (off by default):
+//! [`ToolGate::with_certification`] also requires the release to hold a
+//! certification that verifies offline *now* (`cloakpipe_cert::statement::verify`:
+//! trusted signer, not revoked, inside its validity window, about this
+//! release, `certified` decision) for the gate's environment; without one
+//! every call is refused.
 //!
 //! A release can also bind tool contracts (`policy:tool-contract/...` in
 //! `spec.policies`, see [`cloakpipe_release::contract`]). The gate is then
@@ -40,6 +40,7 @@
 //! whose outcome is unknown is never silently re-executed. A gate with such
 //! a tool and no store is not [`ToolGate::ready`].
 
+#[cfg(feature = "certification")]
 use cloakpipe_cert::statement::{verify, Status, VerifyContext};
 use cloakpipe_receipt::approval::{verify_approval, ApprovalCheck, ApprovalError};
 use cloakpipe_receipt::dsse::{Envelope, TrustedKey};
@@ -67,13 +68,16 @@ pub enum GateMode {
 pub enum Denial {
     /// The manifest does not declare this tool.
     UndeclaredTool,
-    /// No certification was supplied.
+    /// Legacy (`certification` feature): no certification was supplied.
+    #[cfg(feature = "certification")]
     Uncertified,
-    /// The certification does not certify the release now; carries the
-    /// verification status (`expired`, `revoked`, `invalid`, ...) or
-    /// `blocked` for a verified BLOCKED decision.
+    /// Legacy (`certification` feature): the certification does not certify
+    /// the release now; carries the verification status (`expired`,
+    /// `revoked`, `invalid`, ...) or `blocked` for a verified BLOCKED decision.
+    #[cfg(feature = "certification")]
     NotCertified(String),
-    /// Certified, but for another environment.
+    /// Legacy (`certification` feature): certified, but for another environment.
+    #[cfg(feature = "certification")]
     WrongEnvironment(String),
     /// A required argument is absent (`path`: its contract path).
     ArgumentMissing { path: Option<String> },
@@ -115,8 +119,11 @@ impl Denial {
     pub fn code(&self) -> String {
         match self {
             Denial::UndeclaredTool => "undeclared_tool".into(),
+            #[cfg(feature = "certification")]
             Denial::Uncertified => "uncertified".into(),
+            #[cfg(feature = "certification")]
             Denial::NotCertified(status) => status.clone(),
+            #[cfg(feature = "certification")]
             Denial::WrongEnvironment(_) => "wrong_environment".into(),
             Denial::ArgumentMissing { .. } => ViolationCode::ArgumentMissing.code().into(),
             Denial::ArgumentNotAllowed { .. } => ViolationCode::ArgumentNotAllowed.code().into(),
@@ -228,7 +235,7 @@ impl std::fmt::Display for GateConfigError {
         match self {
             GateConfigError::NotInRelease { policy_ref } => write!(
                 f,
-                "tool contract {policy_ref} is not bound by the release: add it to spec.policies (and re-certify) or supply the contract the release binds"
+                "tool contract {policy_ref} is not bound by the release: add it to spec.policies or supply the contract the release binds"
             ),
             GateConfigError::NotSupplied { policy_ref } => {
                 write!(f, "the release binds tool contract {policy_ref}, which was not supplied (--tool-contract)")
@@ -246,13 +253,21 @@ impl std::fmt::Display for GateConfigError {
 
 impl std::error::Error for GateConfigError {}
 
+/// Legacy (`certification` feature): the certification a gate requires.
+#[cfg(feature = "certification")]
+struct CertificationRequirement {
+    environment: String,
+    certification: Option<Envelope>,
+    verify: VerifyContext,
+}
+
 pub struct ToolGate {
     pub mode: GateMode,
     release: String,
-    environment: String,
     tools: BTreeSet<String>,
-    certification: Option<Envelope>,
-    verify: VerifyContext,
+    /// `None`: the release manifest alone decides (the default).
+    #[cfg(feature = "certification")]
+    certification: Option<CertificationRequirement>,
     /// `spec.policies` entries that bind tool contracts.
     contract_refs: BTreeSet<String>,
     /// Whether [`Self::with_contracts`] accepted the contracts the release binds.
@@ -272,15 +287,10 @@ pub struct ToolGate {
 }
 
 impl ToolGate {
-    /// `verify` carries the trusted keys and revocations; its `now` and
-    /// `expected_release` are set per check.
-    pub fn new(
-        mode: GateMode,
-        manifest: &AgentRelease,
-        environment: &str,
-        certification: Option<Envelope>,
-        verify: VerifyContext,
-    ) -> Self {
+    /// A gate for the release `manifest`: it allows the tools the manifest
+    /// declares. Give it the tool contracts the release binds with
+    /// [`Self::with_contracts`].
+    pub fn new(mode: GateMode, manifest: &AgentRelease) -> Self {
         let tools = manifest
             .spec
             .tools
@@ -298,10 +308,9 @@ impl ToolGate {
         Self {
             mode,
             release: manifest.manifest_hash().to_string(),
-            environment: environment.to_string(),
             tools,
-            certification,
-            verify,
+            #[cfg(feature = "certification")]
+            certification: None,
             contracts_loaded: contract_refs.is_empty(),
             contract_refs,
             contracts: BTreeMap::new(),
@@ -311,6 +320,17 @@ impl ToolGate {
             recovered: Vec::new(),
             operation_id_key: None,
         }
+    }
+
+    /// Legacy (`certification` feature): also refuse every call unless
+    /// `certification` verifies now for this release and `environment`.
+    /// `verify` carries the trusted keys and revocations; its `now` and
+    /// `expected_release` are set per check. `None`: every call is refused
+    /// as `uncertified`.
+    #[cfg(feature = "certification")]
+    pub fn with_certification(mut self, environment: &str, certification: Option<Envelope>, verify: VerifyContext) -> Self {
+        self.certification = Some(CertificationRequirement { environment: environment.to_string(), certification, verify });
+        self
     }
 
     /// Give the gate the release's tool contracts and the trusted task
@@ -413,11 +433,30 @@ impl ToolGate {
         if !self.tools.contains(tool) {
             return Err(Denial::UndeclaredTool);
         }
-        let Some(envelope) = &self.certification else { return Err(Denial::Uncertified) };
+        #[cfg(feature = "certification")]
+        if let Some(required) = &self.certification {
+            self.check_certification(required, now)?;
+        }
+        if !self.contracts_loaded {
+            return Err(Denial::ContractMissing);
+        }
+        let Some(rule) = self.contracts.get(tool).and_then(|c| c.rule(tool)) else { return Ok(Authorization::default()) };
+        rule.check(arguments, self.task.as_ref())?;
+        let arguments = arguments.unwrap_or(&Value::Null);
+        let approval = if rule.requires_approval { Some(self.approve(tool, arguments, now)?) } else { None };
+        let operation = if rule.side_effect { Some(self.operation_key(tool, arguments, approval.as_ref())?) } else { None };
+        Ok(Authorization { approval, operation })
+    }
+
+    /// Legacy (`certification` feature): does the certification certify the
+    /// release now, for the gate's environment?
+    #[cfg(feature = "certification")]
+    fn check_certification(&self, required: &CertificationRequirement, now: &str) -> Result<(), Denial> {
+        let Some(envelope) = &required.certification else { return Err(Denial::Uncertified) };
         let ctx = VerifyContext {
             now: now.to_string(),
             expected_release: Some(self.release.clone()),
-            ..self.verify.clone()
+            ..required.verify.clone()
         };
         let report = verify(envelope, &ctx);
         if !report.certified {
@@ -433,19 +472,10 @@ impl ToolGate {
         }
         // Signed and verified: its scope can be trusted.
         match certified_environment(envelope) {
-            Some(env) if env == self.environment => {}
-            Some(env) => return Err(Denial::WrongEnvironment(env)),
-            None => return Err(Denial::NotCertified("invalid".into())),
+            Some(env) if env == required.environment => Ok(()),
+            Some(env) => Err(Denial::WrongEnvironment(env)),
+            None => Err(Denial::NotCertified("invalid".into())),
         }
-        if !self.contracts_loaded {
-            return Err(Denial::ContractMissing);
-        }
-        let Some(rule) = self.contracts.get(tool).and_then(|c| c.rule(tool)) else { return Ok(Authorization::default()) };
-        rule.check(arguments, self.task.as_ref())?;
-        let arguments = arguments.unwrap_or(&Value::Null);
-        let approval = if rule.requires_approval { Some(self.approve(tool, arguments, now)?) } else { None };
-        let operation = if rule.side_effect { Some(self.operation_key(tool, arguments, approval.as_ref())?) } else { None };
-        Ok(Authorization { approval, operation })
     }
 
     /// The operation a call to `tool` is, whether or not it passes the gate:
@@ -527,6 +557,7 @@ impl ToolGate {
 }
 
 /// `predicate.certification.environment` of a (verified) envelope.
+#[cfg(feature = "certification")]
 fn certified_environment(envelope: &Envelope) -> Option<String> {
     use base64::prelude::*;
     let payload = BASE64_STANDARD.decode(&envelope.payload).ok()?;

@@ -14,4 +14,4 @@ spec:
     - ref: tool:lookup_ticket@1
     - ref: tool:send_email@1
   policies:
-    - ref: policy:tool-contract/support-tools@sha256:0000000000000000000000000000000000000000000000000000000000000000
+    - ref: policy:tool-contract/support-tools@sha256:921d3d7f167559b26cb8891dc282d32ee4d2efa5d4c8f6e052e892e00669fd44

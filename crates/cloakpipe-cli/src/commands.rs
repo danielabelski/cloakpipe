@@ -435,10 +435,10 @@ fn release_from_var(v: Result<String, std::env::VarError>) -> Result<Option<[u8;
 /// (`sha256:<hex>` from `cloakpipe release hash`) to bind each hop to the
 /// Agent Release being run. `--tool-contract` / `--task-context` add
 /// argument-level rules (docs/ACTION_BOUNDARY.md).
-pub async fn mcp_proxy(config_path: &str, args: crate::cert::McpProxyArgs) -> Result<()> {
+pub async fn mcp_proxy(config_path: &str, args: crate::gate::McpProxyArgs) -> Result<()> {
     // Configuration errors are already on stderr; fail before spawning
     // anything, with the documented exit code (1 invalid input, 2 usage).
-    let gate = match crate::cert::gate_from_args(&args) {
+    let gate = match crate::gate::gate_from_args(&args) {
         Ok(gate) => gate,
         Err(code) => std::process::exit(code),
     };
