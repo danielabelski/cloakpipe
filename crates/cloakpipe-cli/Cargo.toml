@@ -50,6 +50,7 @@ uuid.workspace = true
 certification = ["cloakpipe-mcp/certification"]
 
 [dev-dependencies]
+rusqlite = { workspace = true }
 tempfile = "3"
 uuid.workspace = true
 serde_json.workspace = true

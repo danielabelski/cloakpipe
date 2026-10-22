@@ -2,7 +2,6 @@
 //! upstream tool, the agent gets a JSON-RPC error for them, and the refusal
 //! is evidence bound to the release.
 
-use cloakpipe_core::{config::DetectionConfig, detector::Detector, vault::Vault};
 use cloakpipe_ledger::{ActionKind, LedgerStore, MetadataValue};
 use cloakpipe_mcp::{run_proxy_io, stable_ids, GateMode, ProxyContext, ToolGate};
 use cloakpipe_release::AgentRelease;
@@ -75,8 +74,7 @@ fn run(gate: ToolGate, lines: &[String]) -> (Capture, String, Vec<cloakpipe_ledg
     let ledger_db = dir.path().join("ledger.db");
     let release = gate.release_bytes();
     let ctx = ProxyContext {
-        detector: Detector::from_config(&serde_json::from_str::<DetectionConfig>("{}").unwrap()).unwrap(),
-        vault: Vault::ephemeral(),
+        pii: None,
         ledger_db: Some(ledger_db.to_string_lossy().into_owned()),
         release: Some(release),
         gate: Some(gate),

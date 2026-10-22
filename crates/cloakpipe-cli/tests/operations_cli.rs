@@ -407,3 +407,31 @@ fn reconciling_an_in_flight_operation_needs_force() {
     assert_eq!(report["previousState"], "in_flight");
     assert_eq!(report["state"], "not_applied");
 }
+
+#[test]
+fn a_v011_operations_db_with_masked_results_needs_transform_pii() {
+    let w = world(false);
+    let r = w.run(false, &[call(1)]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    assert_eq!(effects(w.path()), 1);
+    // Make the stored result look as v0.11 left it: every v0.11 result was
+    // masked, and an upgraded v0.11 row carries no masking flag.
+    rusqlite::Connection::open(w.ops_db()).unwrap().execute("UPDATE operations SET result_masked = NULL", []).unwrap();
+
+    // Without --transform pii a replay would hand the agent pseudonym tokens:
+    // the proxy refuses to start and says what to do.
+    let r = w.run(false, &[call(2)]);
+    assert_ne!(r.code, 0, "refused: {}", r.err);
+    assert!(r.err.contains("--transform pii"), "{}", r.err);
+    assert!(r.msgs.is_empty(), "{:?}", r.msgs);
+    assert_eq!(effects(w.path()), 1, "the tool was not called");
+
+    // With it, the retry replays the stored result through the vault.
+    let db = w.ops_db();
+    let r = w.proxy(false, &["--operations-db", &db, "--transform", "pii"], &[], &[call(3)]);
+    assert_eq!(r.code, 0, "{}", r.err);
+    let a = answer(&r.msgs, 3);
+    assert_eq!(a["result"]["_meta"]["cloakpipe"]["replayed"], true, "{a}");
+    assert_eq!(a["result"]["content"][0]["text"], "patched", "{a}");
+    assert_eq!(effects(w.path()), 1, "no second effect");
+}
