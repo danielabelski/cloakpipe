@@ -687,7 +687,7 @@ fn a_side_effect_gate_without_an_operations_store_does_not_start() {
 
 mod approvals {
     use super::*;
-    use cloakpipe_cert::approval::{sign_approval, Approval};
+    use cloakpipe_receipt::approval::{sign_approval, Approval};
 
     fn approver() -> SigningKey {
         SigningKey::from_bytes(&[21u8; 32])

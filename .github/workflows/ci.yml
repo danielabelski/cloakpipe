@@ -35,6 +35,17 @@ jobs:
         run: cargo test --workspace
       - name: Clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings
+      # The workspace build unifies features, and cloakpipe-cli turns on
+      # cloakpipe-verify's `release-pack`, so test the verifier on its own
+      # both ways: default (no certification code) and with release packs.
+      - name: Test verifier (default features, no release-pack)
+        run: cargo test -p cloakpipe-verify
+      - name: Test verifier (release-pack)
+        run: |
+          cargo test -p cloakpipe-verify --features release-pack
+          cargo clippy -p cloakpipe-verify --all-targets --features release-pack -- -D warnings
+      - name: Dependency boundary (no cloakpipe-cert under the evidence crates)
+        run: ./tools/check_dep_boundary.sh
 
   cloakleak-gate:
     name: cloakleak zero-leak gate
@@ -336,7 +347,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build
-        run: cargo build -p cloakpipe-cli -p cloakpipe-verify -p cloakpipe-ledger --bins
+        run: cargo build -p cloakpipe-cli -p cloakpipe-verify -p cloakpipe-ledger --bins --features cloakpipe-verify/release-pack
       - name: Evidence for one release (keys, run, certification, ledger export, events)
         run: |
           mkdir -p "$WORK"

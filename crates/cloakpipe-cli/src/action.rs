@@ -7,7 +7,7 @@
 use crate::cert::{invalid, now_arg, read, rfc3339, signing_key, usage, Res};
 use crate::release::{load_valid, EXIT_OK};
 use clap::{Args, Subcommand};
-use cloakpipe_cert::approval::{is_valid_operation_id, OPERATION_ID_FORBIDDEN, parse_json_strict, sign_approval, Approval};
+use cloakpipe_receipt::approval::{is_valid_operation_id, OPERATION_ID_FORBIDDEN, parse_json_strict, sign_approval, Approval};
 use cloakpipe_release::action::{fingerprint, ToolCallFingerprint};
 use cloakpipe_release::{AgentRelease, Reference};
 use serde_json::{json, Value};

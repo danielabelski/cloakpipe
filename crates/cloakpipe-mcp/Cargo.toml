@@ -10,6 +10,9 @@ description = "MCP server for CloakPipe — expose privacy tools to AI agents"
 cloakpipe-core = { path = "../cloakpipe-core", version = "0.11.0" }
 cloakpipe-ledger = { path = "../cloakpipe-ledger", version = "0.11.0" }
 cloakpipe-release = { path = "../cloakpipe-release", version = "0.11.0" }
+cloakpipe-receipt = { path = "../cloakpipe-receipt", version = "0.11.0" }
+# Certification statements are still verified by the gate; this dependency
+# moves behind a cargo feature together with that check.
 cloakpipe-cert = { path = "../cloakpipe-cert", version = "0.11.0" }
 base64 = "0.23"
 chrono = { workspace = true }

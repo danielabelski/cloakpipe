@@ -12,7 +12,8 @@
 //! cloakpipe-verify release-pack <pack.json> --trust KEYFILE [--ledger-trust KEYFILE]
 //!                                [--cert-trust KEYFILE] [--now RFC3339] [--json]
 //!                                          # each trust flag takes one file; repeat it
-//!                                          # a release audit pack (docs/AUDIT_PACK.md)
+//!                                          # a release audit pack (docs/AUDIT_PACK.md);
+//!                                          # needs the `release-pack` cargo feature
 //! ```
 //!
 //! `--trust-key` pins the signer: the manifest must be signed by one of the
@@ -25,8 +26,9 @@
 //! wrong." Evidence bundles are verified with this crate's own code — no
 //! `cloakpipe-ledger`. A hostile third party can clone only this crate,
 //! build it, and verify any bundle the producer emits. Release audit packs
-//! additionally use the two spec crates `cloakpipe-release` (manifest hash)
-//! and `cloakpipe-cert` (DSSE certification verification); neither produces
+//! (the optional `release-pack` cargo feature, off by default) additionally
+//! use the two spec crates `cloakpipe-release` (manifest hash) and
+//! `cloakpipe-cert` (DSSE certification verification); neither produces
 //! evidence, and the release hash also has an independent Python reference
 //! (`tools/release_hash_reference.py`).
 
@@ -187,6 +189,15 @@ fn run(args: &[String]) -> Result<ExitCode> {
 /// [--now T] [--json]`, each trust flag repeatable with one file per use.
 /// Usage and I/O problems are errors (exit 2); everything about the pack's
 /// content is a verification result (exit 0 or 1).
+#[cfg(not(feature = "release-pack"))]
+fn release_pack(_args: &[String]) -> Result<ExitCode> {
+    anyhow::bail!(
+        "release-pack: this cloakpipe-verify was built without the `release-pack` cargo feature \
+         (rebuild with `--features release-pack`)"
+    )
+}
+
+#[cfg(feature = "release-pack")]
 fn release_pack(args: &[String]) -> Result<ExitCode> {
     use cloakpipe_verify::pack::{trusted_key_from_json, verify_pack_bytes, VerifyOptions, MAX_PACK_BYTES};
     use std::io::Read;
@@ -363,6 +374,7 @@ USAGE:
       --cert-trust the certification issuers. Each flag takes one KEYFILE;
       repeat the flag for more. One key may not hold two roles. Offline;
       --now defaults to the current time; packs over 256 MiB are refused.
+      Only in builds with the `release-pack` cargo feature.
 
 TRUST INPUTS (external anchors; never read from the bundle):
   --tsa-root PEM   root certificate(s) an RFC 3161 TSA must chain to
@@ -377,6 +389,7 @@ EXITS:
 
 NOTES:
   This binary has NO dependency on cloakpipe-ledger or any other
-  evidence producer. Release packs use the spec crates cloakpipe-release
-  and cloakpipe-cert for the manifest hash and certifications.
+  evidence producer. Release packs (`release-pack` feature) use the spec
+  crates cloakpipe-release and cloakpipe-cert for the manifest hash and
+  certifications.
 ";

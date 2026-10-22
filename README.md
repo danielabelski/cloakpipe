@@ -94,13 +94,14 @@ A passing test of one configuration can never certify a different one.
 |---|---|
 | [`cloakpipe-cli`](crates/cloakpipe-cli) | The `cloakpipe` binary: proxy, MCP, release, eval, anchor, audit-pack, scan and other commands. |
 | [`cloakpipe-release`](crates/cloakpipe-release) | Agent Release manifests: schema, validation (immutable references only), RFC 8785 canonical hashing, material-change diff, in-toto Statement. |
-| [`cloakpipe-cert`](crates/cloakpipe-cert) | `EvaluationRun` and `CertificationPolicy` models, JUnit/Braintrust/Langfuse importers, the deterministic `decide()` engine, DSSE signing and verification. |
+| [`cloakpipe-receipt`](crates/cloakpipe-receipt) | DSSE envelopes over in-toto Statements (Ed25519, RFC 8785) and signed approval receipts for one exact tool call. No certification code. |
+| [`cloakpipe-cert`](crates/cloakpipe-cert) | `EvaluationRun` and `CertificationPolicy` models, JUnit/Braintrust/Langfuse importers, the deterministic `decide()` engine, certification statements and their verification. |
 | [`cloakpipe-core`](crates/cloakpipe-core) | Detection (regex + checksums, financial, optional ONNX NER), pseudonymization, encrypted vault, rehydration, sessions, industry profiles. |
 | [`cloakpipe-proxy`](crates/cloakpipe-proxy) | Axum HTTP proxy: `/v1/chat/completions`, `/v1/messages`, `/v1/embeddings`, SSE streaming rehydration, session and CloakTree endpoints. |
 | [`cloakpipe-mcp`](crates/cloakpipe-mcp) | MCP server exposing six privacy tools, and the MCP interceptor with the release tool gate and ledger recording. |
 | [`cloakpipe-ledger`](crates/cloakpipe-ledger) | Verifiable evidence ledger: no-PII records, canonical encoding, per-tenant hash chain, Ed25519 signatures, bundle export, batch sealing. |
 | [`cloakpipe-anchor`](crates/cloakpipe-anchor) | Merkle batching and inclusion proofs, RFC 3161 TSA and Sigstore Rekor clients. |
-| [`cloakpipe-verify`](crates/cloakpipe-verify) | Standalone verifier for evidence bundles (chain, signatures, anchors, proofs, manifest) and release audit packs. Produces no evidence itself. |
+| [`cloakpipe-verify`](crates/cloakpipe-verify) | Standalone verifier for evidence bundles (chain, signatures, anchors, proofs, manifest) and, with the `release-pack` cargo feature (off by default), release audit packs. Produces no evidence itself. |
 | [`cloakpipe-audit`](crates/cloakpipe-audit) | Structured JSONL / SQLite audit log for the HTTP proxy (metadata only). |
 | [`cloakpipe-tree`](crates/cloakpipe-tree) | CloakTree: vectorless, LLM-driven document retrieval over a local tree index. |
 | [`cloakpipe-vector`](crates/cloakpipe-vector) | ADCPE distance-preserving embedding encryption (experimental). |

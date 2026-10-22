@@ -6,7 +6,9 @@
 #![allow(dead_code, unused_imports)]
 
 pub mod anchoring;
+#[cfg(feature = "release-pack")]
 pub mod pack;
 
 pub use anchoring::*;
+#[cfg(feature = "release-pack")]
 pub use pack::*;

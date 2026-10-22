@@ -23,7 +23,7 @@
 //! behaviour above.
 //!
 //! A contract tool with `requiresApproval: true` also needs a signed
-//! approval receipt for this exact call ([`cloakpipe_cert::approval`]): the
+//! approval receipt for this exact call ([`cloakpipe_receipt::approval`]): the
 //! gate computes the call's fingerprint
 //! ([`cloakpipe_release::action::fingerprint`] over the raw arguments),
 //! reads `<fingerprint hex>.approval.json` from the directory given to
@@ -40,8 +40,9 @@
 //! whose outcome is unknown is never silently re-executed. A gate with such
 //! a tool and no store is not [`ToolGate::ready`].
 
-use cloakpipe_cert::approval::{verify_approval, ApprovalCheck, ApprovalError};
-use cloakpipe_cert::statement::{verify, Envelope, Status, TrustedKey, VerifyContext};
+use cloakpipe_cert::statement::{verify, Status, VerifyContext};
+use cloakpipe_receipt::approval::{verify_approval, ApprovalCheck, ApprovalError};
+use cloakpipe_receipt::dsse::{Envelope, TrustedKey};
 use cloakpipe_release::action::{derive_operation_id, fingerprint, ToolCallFingerprint};
 use cloakpipe_release::contract::{self, ToolContract, ViolationCode};
 use cloakpipe_release::{AgentRelease, Reference, ReleaseHash};
