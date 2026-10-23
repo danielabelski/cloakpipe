@@ -9,6 +9,24 @@ may contain breaking changes; these are marked **Breaking**.
 
 ## [Unreleased]
 
+### Changed
+
+- **New crate `cloakpipe-receipt`.** The DSSE layer (`Envelope`,
+  `Signature`, `TrustedKey`, `pae`, `sign`, `verified_keyids`,
+  `NoDuplicateKeys`, `parse_rfc3339`) and approval receipts
+  (`cloakpipe_receipt::approval`) moved out of `cloakpipe-cert`, so the MCP
+  gate can verify approvals without the certification pipeline.
+  `cloakpipe_cert::statement` and `cloakpipe_cert::approval` re-export them
+  for one release; the types are the same, not copies.
+- **Breaking (`cloakpipe-verify`):** release audit packs (the `pack` module
+  and the `cloakpipe-verify release-pack` command) are behind the new
+  `release-pack` cargo feature, off by default, so the default verifier, and
+  the ledger and anchor crates that depend on it, no longer pull in
+  `cloakpipe-cert`. A verifier built without the feature answers
+  `release-pack` with a usage error (exit 2) naming the feature. The
+  `cloakpipe` CLI enables it for `release audit-pack`. CI checks the
+  dependency boundary with `tools/check_dep_boundary.sh`.
+
 ## [0.11.0] - 2026-10-12
 
 ### Added

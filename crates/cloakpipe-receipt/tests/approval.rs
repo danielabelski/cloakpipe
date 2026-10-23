@@ -4,11 +4,11 @@
 //! is about to forward.
 
 use base64::prelude::*;
-use cloakpipe_cert::approval::{
+use cloakpipe_receipt::approval::{
     approval_statement, is_valid_operation_id, sign_approval, verify_approval, Approval, ApprovalCheck, ApprovalError,
     APPROVAL_PREDICATE_TYPE, CLOCK_SKEW_SECS,
 };
-use cloakpipe_cert::statement::{pae, Envelope, Signature, TrustedKey, PAYLOAD_TYPE};
+use cloakpipe_receipt::dsse::{pae, Envelope, Signature, TrustedKey, PAYLOAD_TYPE};
 use cloakpipe_release::action::{fingerprint, ToolCallFingerprint};
 use cloakpipe_release::ReleaseHash;
 use ed25519_dalek::{Signer, SigningKey};
@@ -256,7 +256,7 @@ fn operation_ids_with_ledger_pii_markers_are_refused() {
 
 #[test]
 fn arguments_with_duplicate_keys_are_refused() {
-    use cloakpipe_cert::approval::parse_json_strict;
+    use cloakpipe_receipt::approval::parse_json_strict;
     assert_eq!(parse_json_strict(r#"{"a": {"b": 1}}"#).unwrap(), json!({"a": {"b": 1}}));
     assert!(parse_json_strict(r#"{"a": 1, "a": 2}"#).is_err());
     assert!(parse_json_strict(r#"{"a": {"b": 1, "b": 1}}"#).is_err());

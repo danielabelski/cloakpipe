@@ -400,7 +400,7 @@ mod contracts {
 
 mod approvals {
     use super::*;
-    use cloakpipe_cert::approval::{sign_approval, Approval};
+    use cloakpipe_receipt::approval::{sign_approval, Approval};
     use cloakpipe_mcp::ApprovedCall;
     use cloakpipe_release::action::{fingerprint, ToolCallFingerprint};
     use cloakpipe_release::contract::ToolContract;

@@ -205,7 +205,7 @@ fn state_names_are_stable() {
 /// the evidence ledger accepts as an `operation_id`, so its hops are never lost.
 #[test]
 fn every_valid_operation_id_is_a_ledger_opaque_id() {
-    use cloakpipe_cert::approval::is_valid_operation_id;
+    use cloakpipe_receipt::approval::is_valid_operation_id;
     use cloakpipe_ledger::{MetadataValue, RecordBuilder};
     let ledger_ok =
         |id: &str| RecordBuilder::new().metadata("operation_id", MetadataValue::OpaqueId(id.to_string())).build().is_ok();

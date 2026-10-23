@@ -8,6 +8,7 @@ description = "Agent Release certification: evaluation runs, deterministic certi
 
 [dependencies]
 cloakpipe-release = { path = "../cloakpipe-release", version = "0.11.0" }
+cloakpipe-receipt = { path = "../cloakpipe-receipt", version = "0.11.0" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_json_canonicalizer = "0.3"

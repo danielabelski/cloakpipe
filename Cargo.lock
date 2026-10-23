@@ -517,6 +517,7 @@ version = "0.11.0"
 dependencies = [
  "base64 0.23.1",
  "chrono",
+ "cloakpipe-receipt",
  "cloakpipe-release",
  "ed25519-dalek",
  "hex",
@@ -544,6 +545,7 @@ dependencies = [
  "cloakpipe-ledger",
  "cloakpipe-mcp",
  "cloakpipe-proxy",
+ "cloakpipe-receipt",
  "cloakpipe-release",
  "cloakpipe-tree",
  "cloakpipe-vector",
@@ -630,6 +632,7 @@ dependencies = [
  "cloakpipe-cert",
  "cloakpipe-core",
  "cloakpipe-ledger",
+ "cloakpipe-receipt",
  "cloakpipe-release",
  "cloakpipe-verify",
  "ed25519-dalek",
@@ -669,6 +672,19 @@ dependencies = [
  "tower-http",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "cloakpipe-receipt"
+version = "0.11.0"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "cloakpipe-release",
+ "ed25519-dalek",
+ "serde",
+ "serde_json",
+ "serde_json_canonicalizer",
 ]
 
 [[package]]

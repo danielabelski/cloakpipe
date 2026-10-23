@@ -13,9 +13,8 @@
 //! The subject is the [tool-call fingerprint](cloakpipe_release::action),
 //! so the receipt covers the raw arguments without carrying them.
 //!
-//! **Envelope** ([`sign_approval`]): the same DSSE envelope as a
-//! certification ([`crate::statement::sign`]): Ed25519 over the PAE of the
-//! RFC 8785 statement bytes.
+//! **Envelope** ([`sign_approval`]): a DSSE envelope ([`crate::dsse::sign`]):
+//! Ed25519 over the PAE of the RFC 8785 statement bytes.
 //!
 //! **Verification** ([`verify_approval`]) is offline and deterministic (the
 //! caller supplies `now`). It fails with [`ApprovalError::Invalid`] when the
@@ -30,7 +29,7 @@
 //! of `now`. Otherwise it fails with [`ApprovalError::Expired`] when
 //! `now >= notAfter`. Invalid takes precedence over expired. Never panics.
 
-use crate::statement::{self, parse_rfc3339, verified_keyids, Envelope, NoDuplicateKeys, TrustedKey, PAYLOAD_TYPE, STATEMENT_TYPE};
+use crate::dsse::{self, parse_rfc3339, verified_keyids, Envelope, NoDuplicateKeys, TrustedKey, PAYLOAD_TYPE, STATEMENT_TYPE};
 use base64::prelude::*;
 use cloakpipe_release::action::ToolCallFingerprint;
 use ed25519_dalek::SigningKey;
@@ -149,7 +148,7 @@ pub fn approval_statement(fingerprint: &ToolCallFingerprint, a: &Approval) -> Va
 
 /// Sign an approval for the call `fingerprint` into a DSSE envelope.
 pub fn sign_approval(fingerprint: &ToolCallFingerprint, a: &Approval, key: &SigningKey, keyid: &str) -> Envelope {
-    statement::sign(&approval_statement(fingerprint, a), key, keyid)
+    dsse::sign(&approval_statement(fingerprint, a), key, keyid)
 }
 
 /// Verify a receipt against the call in `check` (see the module contract).

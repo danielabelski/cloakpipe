@@ -283,7 +283,7 @@ fn a_contract_digest_not_in_the_release_refuses_to_start() {
 
 mod approvals {
     use super::*;
-    use cloakpipe_cert::approval::{sign_approval, Approval};
+    use cloakpipe_receipt::approval::{sign_approval, Approval};
     use cloakpipe_release::action::fingerprint;
     use sha2::{Digest, Sha256};
 
