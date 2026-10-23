@@ -61,6 +61,17 @@ fn setup(dir: &Path, approval: bool) -> (String, String) {
     (p(dir, "contract.yaml"), p(dir, "release.yaml"))
 }
 
+/// The gate's certification flags. Only the legacy `certification` build has
+/// them (and refuses calls without a certification); the default gate runs on
+/// the release manifest alone.
+fn cert_flags(cert: &str, trust: &str) -> Vec<String> {
+    if cfg!(feature = "certification") {
+        vec!["--certification".into(), cert.into(), "--trust".into(), trust.into()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// keygen + JUnit import + certify the release → (envelope, key file).
 fn certify(dir: &Path, release: &str) -> (String, String) {
     run_ok(dir, &["release", "keygen", "--out", &p(dir, "key.json")]);
@@ -144,13 +155,8 @@ impl World {
     }
 
     fn gate(&self) -> Vec<String> {
-        [
-            "--manifest", &self.release, "--certification", &self.cert, "--trust", &self.trust,
-            "--tool-contract", &self.contract, "--task-context", &example("task-context.json"),
-        ]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+        let rest = ["--tool-contract", &self.contract, "--task-context", &example("task-context.json")].map(String::from).to_vec();
+        [vec!["--manifest".to_string(), self.release.clone()], cert_flags(&self.cert, &self.trust), rest].concat()
     }
 
     /// `mcp-proxy` with the gate, `extra` flags and `env`, fed `lines`.

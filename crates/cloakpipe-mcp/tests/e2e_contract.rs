@@ -3,7 +3,7 @@
 //! agent gets a JSON-RPC error naming the reason and contract path, and the
 //! refusal is no-PII evidence (`gate_denial`, `gate_path`).
 
-use cloakpipe_cert::statement::{sign, statement, Certification, TrustedKey, VerifyContext};
+use cloakpipe_receipt::dsse::TrustedKey;
 use cloakpipe_core::{config::DetectionConfig, detector::Detector, vault::Vault};
 use cloakpipe_ledger::{record::LedgerRecord, ActionKind, LedgerStore, MetadataValue};
 use cloakpipe_mcp::{run_proxy_io, stable_ids, GateMode, ProxyContext, ToolGate};
@@ -83,34 +83,13 @@ fn task() -> Value {
     serde_json::from_str(&std::fs::read_to_string(example("task-context.json")).unwrap()).unwrap()
 }
 
-fn certified(m: &AgentRelease) -> ToolGate {
-    let release = m.manifest_hash().to_string();
-    let now = chrono::Utc::now();
-    let c: Certification = serde_json::from_value(json!({
-        "id": "cert-contract",
-        "release": release,
-        "environment": "production",
-        "decision": {
-            "outcome": "certified", "release": release,
-            "policy": {"name": "p", "version": "1", "hash": format!("sha256:{}", "cd".repeat(32))},
-            "requiredSuites": [], "runs": [{"runId": "r", "suite": "s", "hash": format!("sha256:{}", "11".repeat(32))}],
-            "baselineRuns": [], "summaries": [], "reasons": []
-        },
-        "issuedAt": (now - chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "validUntil": (now + chrono::Duration::days(30)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "issuer": "test"
-    }))
-    .unwrap();
-    let key = SigningKey::from_bytes(&[7u8; 32]);
-    let trust = VerifyContext {
-        trusted: vec![TrustedKey { keyid: "k1".into(), public_key: key.verifying_key().to_bytes() }],
-        ..Default::default()
-    };
-    ToolGate::new(GateMode::Enforce, m, "production", Some(sign(&statement(&c), &key, "k1")), trust)
+/// A gate over the release manifest alone (no certification).
+fn manifest_gate(m: &AgentRelease) -> ToolGate {
+    ToolGate::new(GateMode::Enforce, m)
 }
 
 fn gate(c: ToolContract, task: Option<Value>) -> ToolGate {
-    certified(&release_binding(&c)).with_contracts(vec![c], task).unwrap()
+    manifest_gate(&release_binding(&c)).with_contracts(vec![c], task).unwrap()
 }
 
 fn call(id: u64, tool: &str, arguments: Value) -> String {
@@ -256,7 +235,7 @@ fn a_contract_path_the_ledger_would_reject_still_records_the_denial() {
 fn warn_mode_forwards_and_records_the_contract_violation() {
     let c = contract(&[]);
     let m = release_binding(&c);
-    let mut g = certified(&m).with_contracts(vec![c], Some(task())).unwrap();
+    let mut g = manifest_gate(&m).with_contracts(vec![c], Some(task())).unwrap();
     g.mode = GateMode::Warn;
     let mut a = args();
     a["patch"]["stage"] = json!("closed-won");
@@ -275,7 +254,7 @@ fn a_contract_digest_not_in_the_release_refuses_to_start() {
     let bound = contract(&[]);
     let edited = contract(&[("maxLength: 280", "maxLength: 100000")]);
     let m = release_binding(&bound);
-    let err = certified(&m).with_contracts(vec![edited.clone()], Some(task())).err().expect("refused");
+    let err = manifest_gate(&m).with_contracts(vec![edited.clone()], Some(task())).err().expect("refused");
     assert!(err.to_string().contains(&edited.policy_ref()), "{err}");
 }
 
@@ -300,7 +279,7 @@ mod approvals {
     fn approval_gate(dir: &Path) -> ToolGate {
         let c = approval_contract();
         let trusted = vec![TrustedKey { keyid: "approver-1".into(), public_key: approver().verifying_key().to_bytes() }];
-        certified(&release_binding(&c)).with_contracts(vec![c], Some(task())).unwrap().with_approvals(dir, trusted)
+        manifest_gate(&release_binding(&c)).with_contracts(vec![c], Some(task())).unwrap().with_approvals(dir, trusted)
     }
 
     fn rfc3339(t: chrono::DateTime<chrono::Utc>) -> String {

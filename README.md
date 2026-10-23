@@ -272,19 +272,19 @@ job on a `BLOCKED` decision by default.
 
 All inputs: [`.github/actions/certify/README.md`](.github/actions/certify/README.md).
 
-### Gate MCP tool calls on the certified release
+### Gate MCP tool calls on the release
 
 `cloakpipe mcp-proxy` sits between an agent and an upstream MCP server (stdio).
 It masks PII in tool-call arguments, rehydrates results, and with `--manifest`
-admits a `tools/call` only if the tool is declared in the release and the
-certification verifies **at the moment of the call** (trusted signer, not
-revoked, inside its validity window, about this release, for this environment).
+admits a `tools/call` only if the tool is declared in the release. No
+certification is needed, and the release needs no code, prompt, model or
+runtime pins (certification at the gate is now a legacy, source-only cargo
+feature; see [CHANGELOG.md](CHANGELOG.md)).
 
 ```bash
 CLOAKPIPE_LEDGER_DB=./ledger.db \
 cloakpipe mcp-proxy --upstream "npx -y @acme/crm-mcp" \
-  --manifest release.yaml --certification release.cert.dsse.json \
-  --trust key.json --environment production     # --gate warn to report instead of refuse
+  --manifest release.yaml     # --gate warn to report instead of refuse
 ```
 
 A refused call never reaches the tool. The agent receives a JSON-RPC error:
@@ -297,8 +297,8 @@ A refused call never reaches the tool. The agent receives a JSON-RPC error:
 Add `--tool-contract crm-tools.contract.yaml --task-context task.json` to check
 each call's arguments too: closed argument lists, typed values, and arguments
 pinned to the task (`bindTo: task.tenant`), so a cross-tenant call is refused
-as `scope_mismatch`. The contract's digest is bound in the release, so it is
-certified with it. A tool marked `requiresApproval: true` runs only with a
+as `scope_mismatch`. The contract's digest is bound in the release, so the
+proxy refuses to start with any other version of it. A tool marked `requiresApproval: true` runs only with a
 signed approval receipt for that exact call (`cloakpipe approve`, then
 `--approvals approvals/ --approver-key approver.json`); change one argument
 and it needs a new approval. A tool marked `sideEffect: true` runs as a tracked
@@ -306,8 +306,10 @@ operation (`--operations-db operations.db`): a retry of a completed call replays
 its result instead of running it twice, and a call whose reply was lost stays
 `unknown` (retries refused as `reconcile_before_retry`) until an operator checks
 the system of record and runs `cloakpipe operations reconcile <id> --outcome
-done|not-applied`. See [docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md) and
-[examples/action-boundary](examples/action-boundary).
+done|not-applied`. See [docs/ACTION_BOUNDARY.md](docs/ACTION_BOUNDARY.md),
+[examples/action-boundary](examples/action-boundary) and
+[examples/support-agent](examples/support-agent) (a prompt-injected
+`send_email` refused, step by step).
 
 With `CLOAKPIPE_LEDGER_DB` set, every call, result and refusal is recorded as a
 release-bound ledger hop. The gate fails closed on unparseable messages,

@@ -5,6 +5,7 @@ mod anchor;
 mod audit_pack;
 mod cert;
 mod commands;
+mod gate;
 mod operations;
 mod release;
 
@@ -46,7 +47,7 @@ enum Commands {
     Mcp,
     /// Transparently proxy an upstream MCP server, masking PII in tool-call
     /// arguments and rehydrating pseudonym tokens in results (M8 interceptor).
-    McpProxy(cert::McpProxyArgs),
+    McpProxy(gate::McpProxyArgs),
     /// CloakTree: vectorless document retrieval
     Tree {
         #[command(subcommand)]

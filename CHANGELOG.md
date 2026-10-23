@@ -9,8 +9,47 @@ may contain breaking changes; these are marked **Breaking**.
 
 ## [Unreleased]
 
+### Added
+
+- `examples/support-agent/`: a support agent whose prompt-injected
+  `send_email` to an attacker is refused (`scope_mismatch` on `/to`, bound to
+  `task.customer_email`), with a stdlib-only mock MCP server and the exact
+  commands and output. The test suite runs it.
+- `AgentRelease::gate_issues()` (`cloakpipe-release`): what the tool gate
+  needs from a release (known `apiVersion`/`kind`, agent name, well-formed
+  and distinct `tool:` and `policy:` references), without the certification
+  pins `validate()` requires.
+
 ### Changed
 
+- **Breaking (`cloakpipe mcp-proxy`): the tool gate no longer requires a
+  certification.** With `--manifest`, a call is allowed when the release
+  declares the tool and the call passes the tool contracts the release binds
+  (and approvals / operations, as before). Calls that 0.11 refused as
+  `uncertified`, `expired`, `revoked`, `invalid`, `blocked` or
+  `wrong_environment` are now forwarded. Default builds no longer accept
+  `--certification`, `--trust`, `--trust-key`, `--revoked-statement`,
+  `--revoked-key` or `--environment` (clap rejects them, exit 2). The old
+  behaviour is a legacy, source-only cargo feature, `certification`, off by
+  default (`cargo build -p cloakpipe-cli --features certification`), kept
+  until certification is removed; published binaries are built without it.
+- **Breaking (`cloakpipe mcp-proxy`):** the gate loads `--manifest` with
+  `AgentRelease::gate_issues()` instead of the certifiability checks, so a
+  release needs no code commit, prompts, model or pinned runtime image to
+  run the gate. A release whose tool or policy references the gate cannot
+  read still refuses to start (exit 1).
+- `cloakpipe-release`: `spec.code`, `spec.prompts`, `spec.model` and
+  `spec.runtime` may be omitted (they read as empty, which `validate()` and
+  `release validate` still report). Hashes of manifests that set them are
+  unchanged.
+- **Breaking (`cloakpipe-mcp` API):** `ToolGate::new(mode, &manifest)` takes
+  no certification arguments. With the `certification` feature,
+  `ToolGate::with_certification(environment, envelope, verify)` restores the
+  requirement, and `Denial::{Uncertified, NotCertified, WrongEnvironment}`
+  exist only in that build. `cloakpipe-mcp` no longer depends on
+  `cloakpipe-cert` by default; `tools/check_dep_boundary.sh` now checks it.
+- CI: a new `test-legacy-features` job runs
+  `cargo test --workspace --features certification`.
 - **New crate `cloakpipe-receipt`.** The DSSE layer (`Envelope`,
   `Signature`, `TrustedKey`, `pae`, `sign`, `verified_keyids`,
   `NoDuplicateKeys`, `parse_rfc3339`) and approval receipts

@@ -1,12 +1,16 @@
 # Action boundary
 
-The MCP tool gate (`cloakpipe mcp-proxy`, see
-[CERTIFICATION.md](CERTIFICATION.md#runtime-the-mcp-tool-gate)) decides
-whether a certified release may call a tool. The action boundary narrows that
-to whether **this exact call** may run. The model proposes a call; CloakPipe
-decides using only trusted inputs (the certified release, its tool contracts,
-and a task context written by the orchestrator). Nothing the agent sends can
-change those inputs.
+The MCP tool gate (`cloakpipe mcp-proxy --manifest release.yaml`) decides
+whether the agent's release may call a tool: only the tools the release
+declares pass. The action boundary narrows that to whether **this exact
+call** may run. The model proposes a call; CloakPipe decides using only
+trusted inputs (the release, its tool contracts, and a task context written
+by the orchestrator). Nothing the agent sends can change those inputs.
+
+The gate needs no certification: the release only has to declare its tools
+and bind its contracts (code, prompt, model and runtime pins are optional).
+A complete example, with a prompt-injected `send_email` refused, is in
+[`examples/support-agent/`](../examples/support-agent).
 
 The files under [`examples/action-boundary/`](../examples/action-boundary)
 are loaded by the test suite, so they stay in step with the code.
@@ -108,7 +112,7 @@ It reaches the gate only through `--task-context <file>` (or
 
 ```bash
 cloakpipe mcp-proxy --upstream "npx -y @acme/crm-mcp" \
-  --manifest release.yaml --certification release.cert.dsse.json --trust key.json \
+  --manifest release.yaml \
   --tool-contract crm-tools.contract.yaml --task-context task-context.json
 ```
 
@@ -220,7 +224,7 @@ certification) around an in-toto Statement:
 
 ```bash
 cloakpipe mcp-proxy --upstream "npx -y @acme/crm-mcp" \
-  --manifest release.yaml --certification release.cert.dsse.json --trust key.json \
+  --manifest release.yaml \
   --tool-contract crm-tools.contract.yaml --task-context task-context.json \
   --approvals approvals/ --approver-key approver.pub.json
 ```
@@ -275,7 +279,7 @@ durable store, so a call whose outcome is unknown is never re-run silently.
 
 ```bash
 cloakpipe mcp-proxy --upstream "npx -y @acme/crm-mcp" \
-  --manifest release.yaml --certification release.cert.dsse.json --trust key.json \
+  --manifest release.yaml \
   --tool-contract crm-tools.contract.yaml --task-context task-context.json \
   --approvals approvals/ --approver-key approver.pub.json \
   --operations-db operations.db

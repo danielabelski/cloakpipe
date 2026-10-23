@@ -44,8 +44,29 @@ jobs:
         run: |
           cargo test -p cloakpipe-verify --features release-pack
           cargo clippy -p cloakpipe-verify --all-targets --features release-pack -- -D warnings
-      - name: Dependency boundary (no cloakpipe-cert under the evidence crates)
+      # Includes mcp_does_not_depend_on_cert: the default gate (cloakpipe-mcp)
+      # must not pull in the certification pipeline.
+      - name: Dependency boundary (no cloakpipe-cert under the gate and evidence crates)
         run: ./tools/check_dep_boundary.sh
+
+  test-legacy-features:
+    # Legacy code behind cargo features that are off by default. `certification`
+    # restores the 0.11 mcp-proxy behaviour (every call refused unless the
+    # release holds a valid certification); its tests are
+    # #[cfg(feature = "certification")] and run only here. Kept until the
+    # certification code is removed.
+    name: test legacy features (certification)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Test workspace (--features certification)
+        run: cargo test --workspace --features certification
+      - name: Clippy (--features certification, deny warnings)
+        run: cargo clippy --workspace --all-targets --features certification -- -D warnings
 
   cloakleak-gate:
     name: cloakleak zero-leak gate
@@ -436,7 +457,7 @@ jobs:
   v2-pr-summary:
     name: PR summary comment
     runs-on: ubuntu-latest
-    needs: [test, cloakleak-gate, verifier-e2e, release-gate, certification-gate, audit-pack-gate]
+    needs: [test, test-legacy-features, cloakleak-gate, verifier-e2e, release-gate, certification-gate, audit-pack-gate]
     if: github.event_name == 'pull_request'
     permissions:
       pull-requests: write
@@ -449,6 +470,7 @@ jobs:
             const body = `## v2 gate results
 
             - [x] build + test + clippy
+            - [x] legacy features (certification) test + clippy
             - [x] cloakleak zero-leak gate (prose + tool_json)
             - [x] cloakpipe-verify end-to-end (chain + sigs + anchors + proofs + all)
             - [x] agent release manifests (validate, golden hash, reference-implementation agreement, diff)

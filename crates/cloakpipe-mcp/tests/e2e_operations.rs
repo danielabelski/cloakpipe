@@ -2,7 +2,7 @@
 //! with `sideEffect: true` runs through the operations store, so a call whose
 //! outcome is unknown is never silently re-executed (docs/ACTION_BOUNDARY.md).
 
-use cloakpipe_cert::statement::{sign, statement, Certification, TrustedKey, VerifyContext};
+use cloakpipe_receipt::dsse::TrustedKey;
 use cloakpipe_core::{config::DetectionConfig, detector::Detector, vault::Vault};
 use cloakpipe_ledger::{record::LedgerRecord, Hop, LedgerStore, MetadataValue};
 use cloakpipe_mcp::operations::{OperationState, OperationStore};
@@ -169,37 +169,16 @@ fn task() -> Value {
     serde_json::from_str(&std::fs::read_to_string(example("task-context.json")).unwrap()).unwrap()
 }
 
-fn certified(m: &AgentRelease) -> ToolGate {
-    let release = m.manifest_hash().to_string();
-    let now = chrono::Utc::now();
-    let c: Certification = serde_json::from_value(json!({
-        "id": "cert-ops",
-        "release": release,
-        "environment": "production",
-        "decision": {
-            "outcome": "certified", "release": release,
-            "policy": {"name": "p", "version": "1", "hash": format!("sha256:{}", "cd".repeat(32))},
-            "requiredSuites": [], "runs": [{"runId": "r", "suite": "s", "hash": format!("sha256:{}", "11".repeat(32))}],
-            "baselineRuns": [], "summaries": [], "reasons": []
-        },
-        "issuedAt": (now - chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "validUntil": (now + chrono::Duration::days(30)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        "issuer": "test"
-    }))
-    .unwrap();
-    let key = SigningKey::from_bytes(&[7u8; 32]);
-    let trust = VerifyContext {
-        trusted: vec![TrustedKey { keyid: "k1".into(), public_key: key.verifying_key().to_bytes() }],
-        ..Default::default()
-    };
-    ToolGate::new(GateMode::Enforce, m, "production", Some(sign(&statement(&c), &key, "k1")), trust)
+/// A gate over the release manifest alone (no certification).
+fn manifest_gate(m: &AgentRelease) -> ToolGate {
+    ToolGate::new(GateMode::Enforce, m)
 }
 
 /// A gate for the side-effect contract (no approval) over the operations
 /// database in `dir`.
 fn gate(dir: &Path, t: Value) -> ToolGate {
     let c = contract(false);
-    certified(&release_binding(&c))
+    manifest_gate(&release_binding(&c))
         .with_contracts(vec![c], Some(t))
         .unwrap()
         .with_operations(OperationStore::open(dir.join("ops.db")).unwrap())
@@ -438,7 +417,7 @@ fn warn_mode_tracks_a_side_effecting_call_that_fails_the_gate() {
     let warn_gate = |dir: &Path| {
         // Approval required and no receipt: approval_required, forwarded in warn mode.
         let c = contract(true);
-        let mut g = certified(&release_binding(&c))
+        let mut g = manifest_gate(&release_binding(&c))
             .with_contracts(vec![c], Some(task()))
             .unwrap()
             .with_operations(OperationStore::open(dir.join("ops.db")).unwrap())
@@ -679,7 +658,7 @@ fn start_up_marks_operations_left_in_flight_unknown_with_evidence() {
 fn a_side_effect_gate_without_an_operations_store_does_not_start() {
     let dir = tempfile::tempdir().unwrap();
     let c = contract(false);
-    let g = certified(&release_binding(&c)).with_contracts(vec![c], Some(task())).unwrap();
+    let g = manifest_gate(&release_binding(&c)).with_contracts(vec![c], Some(task())).unwrap();
     let err = run_proxy_io(fake_tool(dir.path(), Tool::Ok), ctx(g, &dir.path().join("ledger.db")), Cursor::new(Vec::new()), Capture::default())
         .expect_err("refused");
     assert!(err.to_string().contains("--operations-db"), "{err}");
@@ -696,7 +675,7 @@ mod approvals {
     fn approval_gate(dir: &Path) -> ToolGate {
         let c = contract(true);
         let trusted = vec![TrustedKey { keyid: "approver-1".into(), public_key: approver().verifying_key().to_bytes() }];
-        certified(&release_binding(&c))
+        manifest_gate(&release_binding(&c))
             .with_contracts(vec![c], Some(task()))
             .unwrap()
             .with_approvals(dir, trusted)

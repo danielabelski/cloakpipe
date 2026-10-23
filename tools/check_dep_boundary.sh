@@ -3,12 +3,12 @@
 # pipeline. Each crate below is checked with its default features, normal
 # (non-dev, non-build) edges only: `cargo tree -p <crate> -e normal`.
 #
-# cloakpipe-mcp is not listed yet: its gate still verifies certification
-# statements until certification moves behind a cargo feature.
+# cloakpipe-mcp (the gate itself) verifies certifications only when built
+# with its legacy `certification` feature, which is off by default.
 set -euo pipefail
 
 forbidden="cloakpipe-cert"
-crates=(cloakpipe-receipt cloakpipe-verify cloakpipe-anchor cloakpipe-ledger)
+crates=(cloakpipe-mcp cloakpipe-receipt cloakpipe-verify cloakpipe-anchor cloakpipe-ledger)
 
 status=0
 for crate in "${crates[@]}"; do

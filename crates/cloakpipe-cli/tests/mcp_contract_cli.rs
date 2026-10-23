@@ -70,6 +70,17 @@ fn certify(dir: &Path, release: &str) -> (String, String) {
     (p(dir, "cert.dsse.json"), p(dir, "key.json"))
 }
 
+/// The gate's certification flags. Only the legacy `certification` build has
+/// them (and refuses calls without a certification); the default gate runs on
+/// the release manifest alone.
+fn cert_flags(cert: &str, trust: &str) -> Vec<String> {
+    if cfg!(feature = "certification") {
+        vec!["--certification".into(), cert.into(), "--trust".into(), trust.into()]
+    } else {
+        Vec::new()
+    }
+}
+
 /// A fake tool: records each line, answers with an empty result for its id.
 fn upstream(dir: &Path) -> (String, PathBuf) {
     let received = dir.join("received.jsonl");
@@ -125,9 +136,11 @@ fn contract_calls_are_checked_against_the_task_context() {
     let dir = tempfile::tempdir().unwrap();
     let (contract, release, _) = setup(dir.path(), &[], None);
     let (cert, key) = certify(dir.path(), &release);
+    let task = example("task-context.json");
+    let gate = [vec!["--manifest".to_string(), release.clone()], cert_flags(&cert, &key), vec!["--tool-contract".into(), contract.clone(), "--task-context".into(), task]].concat();
     let (code, msgs, seen, err) = proxy(
         dir.path(),
-        &["--manifest", &release, "--certification", &cert, "--trust", &key, "--tool-contract", &contract, "--task-context", &example("task-context.json")],
+        &gate.iter().map(String::as_str).collect::<Vec<_>>(),
         &[],
         &[call(1, args("demo-co")), call(2, args("rival-co"))],
     );
@@ -143,7 +156,8 @@ fn the_task_context_can_come_from_the_environment() {
     let dir = tempfile::tempdir().unwrap();
     let (contract, release, _) = setup(dir.path(), &[], None);
     let (cert, key) = certify(dir.path(), &release);
-    let gate = ["--manifest", &release, "--certification", &cert, "--trust", &key, "--tool-contract", &contract];
+    let gate = [vec!["--manifest".to_string(), release.clone()], cert_flags(&cert, &key), vec!["--tool-contract".into(), contract.clone()]].concat();
+    let gate: Vec<&str> = gate.iter().map(String::as_str).collect();
     let (_, msgs, _, err) = proxy(dir.path(), &gate, &[("CLOAKPIPE_TASK_CONTEXT", &example("task-context.json"))], &[call(1, args("demo-co"))]);
     assert_eq!(refusal(&msgs, 1), None, "{msgs:?} {err}");
     // Without one, bound arguments cannot be checked: refused.
