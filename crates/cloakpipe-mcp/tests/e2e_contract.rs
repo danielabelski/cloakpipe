@@ -1,12 +1,12 @@
-//! The interceptor enforces tool contracts on the raw (pre-masking)
-//! arguments: a call that breaks its contract never reaches the tool, the
+//! The interceptor enforces tool contracts on the raw arguments (before the
+//! opt-in PII transform): a call that breaks its contract never reaches the tool, the
 //! agent gets a JSON-RPC error naming the reason and contract path, and the
 //! refusal is no-PII evidence (`gate_denial`, `gate_path`).
 
 use cloakpipe_receipt::dsse::TrustedKey;
 use cloakpipe_core::{config::DetectionConfig, detector::Detector, vault::Vault};
 use cloakpipe_ledger::{record::LedgerRecord, ActionKind, LedgerStore, MetadataValue};
-use cloakpipe_mcp::{run_proxy_io, stable_ids, GateMode, ProxyContext, ToolGate};
+use cloakpipe_mcp::{run_proxy_io, stable_ids, GateMode, PiiTransform, ProxyContext, ToolGate};
 use cloakpipe_release::contract::ToolContract;
 use cloakpipe_release::{parse_path, AgentRelease, ArtifactRef, Format};
 use ed25519_dalek::SigningKey;
@@ -107,12 +107,24 @@ struct Run {
 }
 
 fn run(gate: ToolGate, lines: &[String]) -> Run {
+    run_with(gate, lines, None)
+}
+
+/// The PII transform (`mcp-proxy --transform pii`) with the default detection
+/// config (emails on) and an ephemeral vault.
+fn pii() -> Option<PiiTransform> {
+    Some(PiiTransform {
+        detector: Detector::from_config(&serde_json::from_str::<DetectionConfig>("{}").unwrap()).unwrap(),
+        vault: Vault::ephemeral(),
+    })
+}
+
+fn run_with(gate: ToolGate, lines: &[String], pii: Option<PiiTransform>) -> Run {
     let dir = tempfile::tempdir().unwrap();
     let (upstream, received) = fake_upstream(dir.path());
     let ledger_db = dir.path().join("ledger.db");
     let ctx = ProxyContext {
-        detector: Detector::from_config(&serde_json::from_str::<DetectionConfig>("{}").unwrap()).unwrap(),
-        vault: Vault::ephemeral(),
+        pii,
         ledger_db: Some(ledger_db.to_string_lossy().into_owned()),
         release: Some(gate.release_bytes()),
         gate: Some(gate),
@@ -162,17 +174,36 @@ fn a_conforming_call_reaches_the_tool() {
     assert!(blocks(&r).is_empty(), "{:?}", r.records);
 }
 
-#[test]
-fn the_contract_sees_raw_arguments_before_masking() {
-    // The task binds the tenant to an email; masking replaces it with a
-    // token before the tool sees it, but the gate compares the raw value.
+/// A task whose tenant is an email address, and a call bound to it.
+fn email_tenant() -> (Value, Value) {
     let mut t = task();
     t["tenant"] = json!("ops@demo-co.example");
     let mut a = args();
     a["tenant"] = json!("ops@demo-co.example");
+    (t, a)
+}
+
+#[test]
+fn upstream_receives_raw_arguments_by_default() {
+    // The gate allows or denies; it never rewrites an allowed call. Without
+    // `--transform pii` the tool gets exactly the arguments the agent sent.
+    let (t, a) = email_tenant();
     let r = run(gate(contract(&[]), Some(t)), &[call(1, "crm.patch", a)]);
     assert!(r.seen.contains("crm.patch"), "allowed: {}", r.seen);
+    assert!(r.seen.contains("ops@demo-co.example"), "the tool gets the raw argument: {}", r.seen);
+    assert!(!r.seen.contains("EMAIL_"), "no pseudonym tokens without --transform pii: {}", r.seen);
+    no_values_in_ledger(&r, &["ops@demo-co.example"]);
+}
+
+#[test]
+fn transform_pii_flag_masks_arguments() {
+    // With the PII transform, masking replaces the email with a token before
+    // the tool sees it, but the contract still checks the raw value.
+    let (t, a) = email_tenant();
+    let r = run_with(gate(contract(&[]), Some(t)), &[call(1, "crm.patch", a)], pii());
+    assert!(r.seen.contains("crm.patch"), "allowed: {}", r.seen);
     assert!(!r.seen.contains("ops@demo-co.example"), "masked before the tool: {}", r.seen);
+    assert!(r.seen.contains("EMAIL_"), "the tool sees a pseudonym token: {}", r.seen);
 }
 
 #[test]

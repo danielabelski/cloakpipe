@@ -17,10 +17,11 @@ use cloakpipe_receipt::dsse::TrustedKey;
 use cloakpipe_release::AgentRelease;
 use std::path::{Path, PathBuf};
 
-/// Transparently proxy an upstream MCP server, masking PII in tool-call
-/// arguments and rehydrating pseudonym tokens in results (M8 interceptor).
-/// With `--manifest`, only the tools the release declares may be called, with
-/// arguments its tool contracts allow (the tool gate).
+/// Transparently proxy an upstream MCP server. With `--manifest`, only the
+/// tools the release declares may be called, with arguments its tool
+/// contracts allow (the tool gate). Allowed calls are forwarded unchanged;
+/// `--transform pii` masks PII in tool-call arguments and rehydrates
+/// pseudonym tokens in results (needs a vault).
 #[derive(Debug, Args)]
 pub struct McpProxyArgs {
     /// Upstream MCP server command + args, e.g.
@@ -86,9 +87,21 @@ pub struct McpProxyArgs {
     /// Default: $CLOAKPIPE_OPERATIONS_DB. One proxy per database.
     #[arg(long = "operations-db")]
     pub operations_db: Option<PathBuf>,
+    /// Opt-in transform of allowed calls. `pii`: pseudonymize PII in
+    /// tool-call arguments before the tool sees them and rehydrate tokens in
+    /// results, through the vault (CLOAKPIPE_VAULT_KEY, vault.path in the
+    /// config). Default: none; arguments reach the tool as the agent sent
+    /// them and no vault is used.
+    #[arg(long, value_parser = ["pii"])]
+    pub transform: Option<String>,
 }
 
 impl McpProxyArgs {
+    /// Whether `--transform pii` was given.
+    pub fn pii(&self) -> bool {
+        self.transform.as_deref() == Some("pii")
+    }
+
     /// Whether any gate flag is set: without `--manifest`, that would
     /// silently run ungated.
     fn any_gate_flag(&self) -> bool {

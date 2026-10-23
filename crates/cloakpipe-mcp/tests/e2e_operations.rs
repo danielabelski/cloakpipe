@@ -3,10 +3,10 @@
 //! outcome is unknown is never silently re-executed (docs/ACTION_BOUNDARY.md).
 
 use cloakpipe_receipt::dsse::TrustedKey;
-use cloakpipe_core::{config::DetectionConfig, detector::Detector, vault::Vault};
+use cloakpipe_core::{config::DetectionConfig, detector::Detector, vault::Vault, EntityCategory};
 use cloakpipe_ledger::{record::LedgerRecord, Hop, LedgerStore, MetadataValue};
 use cloakpipe_mcp::operations::{OperationState, OperationStore};
-use cloakpipe_mcp::{reconcile_operation, run_proxy_io, stable_ids, GateMode, ProxyContext, ToolGate};
+use cloakpipe_mcp::{reconcile_operation, run_proxy_io, stable_ids, GateMode, PiiTransform, ProxyContext, ToolGate};
 use cloakpipe_release::action::{derive_operation_id, fingerprint};
 use cloakpipe_release::contract::ToolContract;
 use cloakpipe_release::{parse_path, AgentRelease, ArtifactRef, Format};
@@ -41,7 +41,8 @@ impl Capture {
 /// appending one line to `effects.jsonl` before it answers (or not).
 #[derive(Clone, Copy)]
 enum Tool {
-    /// Answers each call with a result echoing the (masked) tenant.
+    /// Answers each call with a result echoing the tenant (masked under the
+    /// PII transform).
     Ok,
     /// Commits the first call, then exits without replying (lost ack).
     LoseAck,
@@ -202,9 +203,18 @@ fn op_id(dir: &Path, arguments: &Value) -> String {
 }
 
 fn ctx(gate: ToolGate, ledger_db: &Path) -> ProxyContext {
+    ctx_with(gate, ledger_db, None)
+}
+
+/// The PII transform (`mcp-proxy --transform pii`) over `vault`, with the
+/// default detection config (emails on).
+fn pii(vault: Vault) -> Option<PiiTransform> {
+    Some(PiiTransform { detector: Detector::from_config(&serde_json::from_str::<DetectionConfig>("{}").unwrap()).unwrap(), vault })
+}
+
+fn ctx_with(gate: ToolGate, ledger_db: &Path, pii: Option<PiiTransform>) -> ProxyContext {
     ProxyContext {
-        detector: Detector::from_config(&serde_json::from_str::<DetectionConfig>("{}").unwrap()).unwrap(),
-        vault: Vault::ephemeral(),
+        pii,
         ledger_db: Some(ledger_db.to_string_lossy().into_owned()),
         release: Some(gate.release_bytes()),
         gate: Some(gate),
@@ -227,10 +237,15 @@ fn run(dir: &Path, tool: Tool, gate: ToolGate, lines: &[String]) -> Vec<Value> {
 /// Run the interceptor, sending each line only after the previous request
 /// has been answered (so a retry follows its first attempt's reply).
 fn run_in_turn(dir: &Path, tool: Tool, gate: ToolGate, lines: &[String]) -> Vec<Value> {
+    run_in_turn_with(dir, tool, gate, lines, None)
+}
+
+/// [`run_in_turn`] with the PII transform as given.
+fn run_in_turn_with(dir: &Path, tool: Tool, gate: ToolGate, lines: &[String], pii: Option<PiiTransform>) -> Vec<Value> {
     let (mut agent, proxy_side) = UnixStream::pair().unwrap();
     let out = Capture::default();
     let upstream = fake_tool(dir, tool);
-    let context = ctx(gate, &dir.join("ledger.db"));
+    let context = ctx_with(gate, &dir.join("ledger.db"), pii);
     let writer = out.clone();
     let reader = proxy_side.try_clone().unwrap();
     let handle = std::thread::spawn(move || run_proxy_io(upstream, context, reader, writer).unwrap());
@@ -344,6 +359,30 @@ fn a_reconciled_not_applied_operation_runs_again() {
 }
 
 #[test]
+fn a_done_operation_replays_its_stored_raw_result_by_default() {
+    let dir = tempfile::tempdir().unwrap();
+    // No PII transform: the tool gets the raw tenant and the store keeps
+    // the raw result, which a retry replays verbatim (no vault involved).
+    let mut t = task();
+    t["tenant"] = json!("ops@demo-co.example");
+    let mut a = args();
+    a["tenant"] = json!("ops@demo-co.example");
+    let msgs = run_in_turn(dir.path(), Tool::Ok, gate(dir.path(), t), &[call(1, &a), call(2, &a)]);
+    assert_eq!(effects(dir.path()), 1, "the retry was not forwarded");
+    let first = answer(&msgs, 1);
+    let replay = answer(&msgs, 2);
+    assert_eq!(first["result"]["content"][0]["text"], "patched ops@demo-co.example", "{first}");
+    assert_eq!(replay["result"]["content"], first["result"]["content"], "{replay}");
+    assert_eq!(replay["result"]["_meta"]["cloakpipe"]["replayed"], true, "{replay}");
+
+    let op = op_id(dir.path(), &a);
+    let row = OperationStore::open(dir.path().join("ops.db")).unwrap().get(&op).unwrap().unwrap();
+    assert_eq!(row.state, OperationState::Done);
+    assert!(!row.result_masked, "a result stored without the PII transform is raw");
+    assert!(row.result.unwrap().contains("ops@demo-co.example"));
+}
+
+#[test]
 fn a_done_operation_replays_its_stored_result_rehydrated() {
     let dir = tempfile::tempdir().unwrap();
     // The tenant is an email: masked before the tool, echoed back masked.
@@ -351,7 +390,7 @@ fn a_done_operation_replays_its_stored_result_rehydrated() {
     t["tenant"] = json!("ops@demo-co.example");
     let mut a = args();
     a["tenant"] = json!("ops@demo-co.example");
-    let msgs = run_in_turn(dir.path(), Tool::Ok, gate(dir.path(), t), &[call(1, &a), call(2, &a)]);
+    let msgs = run_in_turn_with(dir.path(), Tool::Ok, gate(dir.path(), t), &[call(1, &a), call(2, &a)], pii(Vault::ephemeral()));
     assert_eq!(effects(dir.path()), 1, "the retry was not forwarded");
     let first = answer(&msgs, 1);
     let replay = answer(&msgs, 2);
@@ -364,8 +403,72 @@ fn a_done_operation_replays_its_stored_result_rehydrated() {
     let op = op_id(dir.path(), &a);
     let row = OperationStore::open(dir.path().join("ops.db")).unwrap().get(&op).unwrap().unwrap();
     assert_eq!(row.state, OperationState::Done);
+    assert!(row.result_masked, "stored under the PII transform");
     let stored = row.result.unwrap();
     assert!(stored.contains("patched") && !stored.contains("ops@demo-co.example"), "{stored}");
+}
+
+/// An operations database as v0.11 wrote it (always-on masking, no
+/// `result_masked` column), holding one `done` operation for `args()` whose
+/// stored result carries the pseudonym `token`. Returns the operation id.
+fn v011_database(dir: &Path, token: &str) -> String {
+    let key = [7u8; 32];
+    let m = release_binding(&contract(false));
+    let op = derive_operation_id(&key, "t-981", &fingerprint(&m.manifest_hash(), "crm.patch", &args()));
+    let digest = fingerprint(&m.manifest_hash(), "crm.patch", &args()).0;
+    let conn = rusqlite::Connection::open(dir.join("ops.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE operations (
+            operation_id TEXT PRIMARY KEY,
+            tool TEXT,
+            call_digest BLOB,
+            state TEXT,
+            result TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE operation_id_key (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            key BLOB NOT NULL CHECK (length(key) = 32)
+        );",
+    )
+    .unwrap();
+    conn.execute("INSERT INTO operation_id_key (id, key) VALUES (1, ?1)", rusqlite::params![&key[..]]).unwrap();
+    let result = json!({"content": [{"type": "text", "text": format!("patched, receipt sent to {token}")}]}).to_string();
+    conn.execute(
+        "INSERT INTO operations VALUES (?1, 'crm.patch', ?2, 'done', ?3, '2026-10-01T00:00:00.000Z')",
+        rusqlite::params![op, &digest[..], result],
+    )
+    .unwrap();
+    op
+}
+
+#[test]
+fn replay_of_v011_masked_row_without_vault_refuses_or_rehydrates() {
+    let dir = tempfile::tempdir().unwrap();
+    // The vault the row was masked through knows EMAIL_1.
+    let mut vault = Vault::ephemeral();
+    let token = vault.get_or_create("ops@demo-co.example", &EntityCategory::Email).token;
+    let op = v011_database(dir.path(), &token);
+
+    // 1. No PII transform (the new default): replaying the row would hand
+    //    the agent pseudonym tokens, so the proxy refuses to start.
+    let out = Capture::default();
+    let err = run_proxy_io(fake_tool(dir.path(), Tool::Ok), ctx(gate(dir.path(), task()), &dir.path().join("ledger.db")), Cursor::new(format!("{}\n", call(1, &args())).into_bytes()), out.clone())
+        .expect_err("refused to start");
+    let msg = err.to_string();
+    assert!(msg.contains("--transform pii"), "{msg}");
+    assert!(msg.contains("masked"), "{msg}");
+    assert!(out.messages().is_empty(), "nothing was answered: {:?}", out.messages());
+    assert_eq!(effects(dir.path()), 0, "the tool was never started or called");
+    assert_eq!(state(dir.path(), &op), OperationState::Done, "the row is left as it was");
+
+    // 2. With the PII transform and the vault: the retry replays the stored
+    //    result rehydrated, and the effect is not run again.
+    let msgs = run_in_turn_with(dir.path(), Tool::Ok, gate(dir.path(), task()), &[call(2, &args())], pii(vault));
+    let a = answer(&msgs, 2);
+    assert_eq!(a["result"]["content"][0]["text"], "patched, receipt sent to ops@demo-co.example", "{a}");
+    assert_eq!(a["result"]["_meta"]["cloakpipe"]["replayed"], true, "{a}");
+    assert_eq!(effects(dir.path()), 0, "no second effect");
 }
 
 #[test]

@@ -26,6 +26,7 @@ fn the_table_has_the_documented_columns() {
         ("state", "TEXT", 0),
         ("result", "TEXT", 0),
         ("updated_at", "TEXT", 0),
+        ("result_masked", "INTEGER", 0),
     ];
     let expected: Vec<(String, String, i64)> = expected.iter().map(|(n, t, p)| (n.to_string(), t.to_string(), *p)).collect();
     assert_eq!(cols, expected);
@@ -64,8 +65,77 @@ fn a_done_operation_replays_its_stored_result() {
     assert!(s.settle("op-1", OperationState::Done, Some(r#"{"content":[{"type":"text","text":"ok"}]}"#)).unwrap());
     assert_eq!(
         s.begin("op-1", "crm.patch", &DIGEST).unwrap(),
-        Begin::Replay { result: Some(r#"{"content":[{"type":"text","text":"ok"}]}"#.into()) }
+        Begin::Replay { result: Some(r#"{"content":[{"type":"text","text":"ok"}]}"#.into()), masked: false }
     );
+}
+
+#[test]
+fn a_result_settled_without_the_pii_transform_is_raw() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = open(dir.path());
+    s.begin("op-1", "crm.patch", &DIGEST).unwrap();
+    assert!(s.settle("op-1", OperationState::Done, Some("{}")).unwrap());
+    assert!(!s.get("op-1").unwrap().unwrap().result_masked);
+    assert!(s.masked_results().unwrap().is_empty());
+}
+
+#[test]
+fn a_result_settled_under_the_pii_transform_is_masked() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = open(dir.path());
+    s.begin("op-1", "crm.patch", &DIGEST).unwrap();
+    assert!(s.settle_masked("op-1", OperationState::Done, Some(r#"{"content":[{"type":"text","text":"EMAIL_1"}]}"#)).unwrap());
+    assert!(s.get("op-1").unwrap().unwrap().result_masked);
+    assert_eq!(
+        s.begin("op-1", "crm.patch", &DIGEST).unwrap(),
+        Begin::Replay { result: Some(r#"{"content":[{"type":"text","text":"EMAIL_1"}]}"#.into()), masked: true }
+    );
+    assert_eq!(s.masked_results().unwrap(), ["op-1"]);
+}
+
+#[test]
+fn a_retried_operation_forgets_that_its_old_result_was_masked() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = open(dir.path());
+    s.begin("op-1", "crm.patch", &DIGEST).unwrap();
+    s.settle_masked("op-1", OperationState::Failed, None).unwrap();
+    assert_eq!(s.begin("op-1", "crm.patch", &DIGEST).unwrap(), Begin::Forward);
+    s.settle("op-1", OperationState::Done, Some("{}")).unwrap();
+    assert!(!s.get("op-1").unwrap().unwrap().result_masked);
+}
+
+#[test]
+fn a_v011_database_is_upgraded_and_its_stored_results_count_as_masked() {
+    // v0.11 masked every tool call, so every result it stored is masked.
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let conn = rusqlite::Connection::open(dir.path().join("ops.db")).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE operations (operation_id TEXT PRIMARY KEY, tool TEXT, call_digest BLOB,
+                                      state TEXT, result TEXT, updated_at TEXT);
+             CREATE TABLE operation_id_key (id INTEGER PRIMARY KEY CHECK (id = 1),
+                                            key BLOB NOT NULL CHECK (length(key) = 32));",
+        )
+        .unwrap();
+        for (id, state, result) in [
+            ("op-a", "done", Some(r#"{"content":[{"type":"text","text":"EMAIL_1"}]}"#)),
+            ("op-b", "done", None), // reconciled as done: nothing stored
+            ("op-c", "failed", None),
+        ] {
+            conn.execute(
+                "INSERT INTO operations VALUES (?1, 'crm.patch', ?2, ?3, ?4, '2026-10-01T00:00:00.000Z')",
+                rusqlite::params![id, &DIGEST[..], state, result],
+            )
+            .unwrap();
+        }
+    }
+    let s = open(dir.path());
+    assert_eq!(s.masked_results().unwrap(), ["op-a"]);
+    assert!(s.get("op-a").unwrap().unwrap().result_masked);
+    assert!(!s.get("op-b").unwrap().unwrap().result_masked);
+    // Opening again changes nothing.
+    drop(s);
+    assert_eq!(open(dir.path()).masked_results().unwrap(), ["op-a"]);
 }
 
 #[test]

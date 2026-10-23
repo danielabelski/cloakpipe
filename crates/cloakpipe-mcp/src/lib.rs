@@ -4,14 +4,14 @@
 //! Transport: stdio (for Claude Code, Cursor, etc.)
 //!
 //! Also exposes the transparent MCP interceptor ([`proxy`]) — a process that
-//! sits between an agent and an upstream MCP server, masking PII in tool calls
-//! and rehydrating results.
+//! sits between an agent and an upstream MCP server, gating tool calls and,
+//! with the opt-in PII transform, masking PII in them and rehydrating results.
 
 pub mod gate;
 pub mod operations;
 pub mod proxy;
 pub use gate::{ApprovedCall, Authorization, Denial, GateConfigError, GateMode, OperationKey, ToolGate};
-pub use proxy::{reconcile_operation, run_proxy, run_proxy_io, stable_ids, ProxyContext};
+pub use proxy::{reconcile_operation, run_proxy, run_proxy_io, stable_ids, PiiTransform, ProxyContext};
 
 use cloakpipe_core::{
     config::{CloakPipeConfig, DetectionConfig},

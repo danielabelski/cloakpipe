@@ -1,6 +1,7 @@
 //! End-to-end gate: interception → evidence ledger → export → offline verify.
 //!
-//! Drives the real MCP interceptor against a real spawned upstream "tool"
+//! Drives the real MCP interceptor, with the opt-in PII transform
+//! (`mcp-proxy --transform pii`), against a real spawned upstream "tool"
 //! (a shell script) and proves, in one flow:
 //!
 //! 1. Raw PII in `tools/call` arguments never reaches the upstream tool.
@@ -12,7 +13,7 @@
 
 use cloakpipe_core::{config::DetectionConfig, detector::Detector, vault::Vault};
 use cloakpipe_ledger::{export, Ed25519Signer, LedgerStore};
-use cloakpipe_mcp::{run_proxy_io, stable_ids, ProxyContext};
+use cloakpipe_mcp::{run_proxy_io, stable_ids, PiiTransform, ProxyContext};
 use std::io::{Cursor, Write};
 use std::sync::{Arc, Mutex};
 
@@ -66,8 +67,8 @@ fn pii_never_reaches_tool_and_evidence_verifies_offline() {
 
     let config: DetectionConfig = serde_json::from_str("{}").unwrap();
     let ctx = ProxyContext {
-        detector: Detector::from_config(&config).unwrap(),
-        vault: Vault::ephemeral(),
+        // The PII transform is opt-in (`mcp-proxy --transform pii`).
+        pii: Some(PiiTransform { detector: Detector::from_config(&config).unwrap(), vault: Vault::ephemeral() }),
         ledger_db: Some(ledger_db.to_string_lossy().into_owned()),
         release: Some(RELEASE),
         gate: None,

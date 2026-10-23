@@ -45,8 +45,8 @@ enum Commands {
     Setup,
     /// Start as an MCP server (for agent integrations)
     Mcp,
-    /// Transparently proxy an upstream MCP server, masking PII in tool-call
-    /// arguments and rehydrating pseudonym tokens in results (M8 interceptor).
+    /// Transparently proxy an upstream MCP server: gate tool calls with
+    /// --manifest; mask PII in arguments only with --transform pii.
     McpProxy(gate::McpProxyArgs),
     /// CloakTree: vectorless document retrieval
     Tree {

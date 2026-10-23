@@ -1,15 +1,20 @@
-//! Transparent MCP interceptor (M8).
+//! Transparent MCP interceptor.
 //!
 //! Sits between an MCP client (the agent) and an upstream MCP server, speaking
-//! MCP's newline-delimited JSON-RPC in both directions:
+//! MCP's newline-delimited JSON-RPC in both directions. By default it forwards
+//! what the agent sent: the gate allows or refuses a call, and never rewrites
+//! an allowed one.
+//!
+//! With the opt-in PII transform ([`ProxyContext::pii`], `mcp-proxy
+//! --transform pii`):
 //!
 //!   agent ──stdin──▶ [ mask tools/call args ] ──▶ upstream stdin
 //!   agent ◀─stdout── [ rehydrate result tokens ] ◀── upstream stdout
 //!
-//! So PII never reaches the (possibly external) tool, and pseudonym tokens the
-//! tool echoes back are restored before the agent sees them. Every masked call
-//! and every result appends a no-PII evidence-ledger hop (`McpToolCall` /
-//! `McpToolResult`) — categories + counts only, never the text.
+//! so PII never reaches the (possibly external) tool, and pseudonym tokens the
+//! tool echoes back are restored before the agent sees them. Every masked or
+//! gated call and every result appends a no-PII evidence-ledger hop
+//! (`McpToolCall` / `McpToolResult`) — categories + counts only, never the text.
 //!
 //! The pump is deliberately synchronous std I/O on two OS threads: all the work
 //! (detect / mask / rehydrate / ledger append) is blocking anyway, and async
@@ -30,10 +35,19 @@ use std::sync::{Arc, Mutex};
 use crate::gate::{Denial, GateMode, OperationKey, ToolGate};
 use crate::operations::{Begin, OperationState, OperationStore, ReconcileError};
 
-/// Everything the interceptor needs beyond the upstream command.
-pub struct ProxyContext {
+/// The opt-in PII transform (`mcp-proxy --transform pii`): tool-call
+/// arguments are pseudonymized through `vault` before the tool sees them,
+/// and tokens in results are rehydrated before the agent does.
+pub struct PiiTransform {
     pub detector: Detector,
     pub vault: Vault,
+}
+
+/// Everything the interceptor needs beyond the upstream command.
+pub struct ProxyContext {
+    /// The PII transform; `None` (the default) forwards arguments and
+    /// results unchanged and needs no vault.
+    pub pii: Option<PiiTransform>,
     /// Evidence ledger DB path (`CLOAKPIPE_LEDGER_DB`); `None` disables recording.
     pub ledger_db: Option<String>,
     /// Agent Release manifest hash (`CLOAKPIPE_RELEASE`) every ledger hop is
@@ -54,6 +68,8 @@ pub const TOOL_REFUSED: i64 = -32001;
 pub const RECONCILE_REQUIRED: i64 = -32002;
 
 type SharedLedger = Option<Arc<Mutex<LedgerStore>>>;
+/// The PII transform as both pump threads share it.
+type SharedPii = Option<Arc<(Detector, Mutex<Vault>)>>;
 type SharedOperations = Option<Arc<Mutex<OperationStore>>>;
 /// Side-effecting calls forwarded and not yet answered.
 #[derive(Default)]
@@ -98,6 +114,9 @@ where
     if let Some(gate) = &ctx.gate {
         // A side-effect tool without an operations store must not run.
         gate.ready()?;
+        if ctx.pii.is_none() {
+            refuse_masked_results(gate)?;
+        }
     }
 
     let mut child = Command::new(&upstream[0])
@@ -111,8 +130,7 @@ where
     let to_upstream = child.stdin.take().context("upstream has no stdin")?;
     let from_upstream = child.stdout.take().context("upstream has no stdout")?;
 
-    let detector = Arc::new(ctx.detector);
-    let vault = Arc::new(Mutex::new(ctx.vault));
+    let pii: SharedPii = ctx.pii.map(|p| Arc::new((p.detector, Mutex::new(p.vault))));
     let ledger: SharedLedger = ctx.ledger_db.as_deref().and_then(open_ledger);
     let (tenant, agent) = stable_ids();
     let release = ctx.release;
@@ -128,10 +146,9 @@ where
     // egress answers refused calls.
     let agent_out = Arc::new(Mutex::new(agent_out));
 
-    // Egress: agent stdin → mask tools/call → upstream stdin.
+    // Egress: agent stdin → (mask tools/call) → upstream stdin.
     {
-        let detector = detector.clone();
-        let vault = vault.clone();
+        let pii = pii.clone();
         let ledger = ledger.clone();
         let agent_out = agent_out.clone();
         let operations = operations.clone();
@@ -193,8 +210,8 @@ where
                             if let Some(gate) = &gate {
                                 let tool = msg.pointer("/params/name").and_then(Value::as_str).unwrap_or("").to_string();
                                 let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-                                // The raw arguments, as the agent sent them: masking
-                                // happens only after the gate has passed the call.
+                                // The raw arguments, as the agent sent them: the PII
+                                // transform runs only after the gate has passed the call.
                                 let arguments = msg.pointer("/params/arguments");
                                 // A refusal, and whether it holds in warn mode too.
                                 let mut refusal: Option<(Denial, bool)> = None;
@@ -235,7 +252,7 @@ where
                                     }
                                     // Exactly-once bookkeeping is not a release rule:
                                     // it holds in warn mode too.
-                                    match coordinate(&operations, &pending, &vault, msg.get("id"), &tool, op) {
+                                    match coordinate(&operations, &pending, &pii, msg.get("id"), &tool, op) {
                                         Coordinated::Forward => {}
                                         Coordinated::Replay(result) => replay = Some((result, op.operation_id.clone())),
                                         Coordinated::Deny(d) => refusal = Some((d, true)),
@@ -299,12 +316,17 @@ where
                                     evidence.extend(path.as_deref().map(|p| opaque("gate_path", p)));
                                 }
                             }
-                            let masked = {
-                                let mut v = vault.lock().expect("vault poisoned");
-                                mask_value(msg.pointer_mut("/params/arguments"), &detector, &mut v)
+                            // Only the opt-in PII transform rewrites an allowed call.
+                            let (masked, kind) = match &pii {
+                                Some(pii) => {
+                                    let (detector, vault) = &**pii;
+                                    let mut v = vault.lock().expect("vault poisoned");
+                                    (mask_value(msg.pointer_mut("/params/arguments"), detector, &mut v), ActionKind::Pseudonymize)
+                                }
+                                None => (0, ActionKind::Passthrough),
                             };
                             if masked > 0 || !evidence.is_empty() {
-                                record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, masked, ActionKind::Pseudonymize, &evidence);
+                                record_hop(&ledger, tenant, agent, release, Hop::McpToolCall, masked, kind, &evidence);
                             }
                         }
                         // Every other forwarded request is outstanding until
@@ -330,9 +352,9 @@ where
         });
     }
 
-    // Ingress: upstream stdout → rehydrate result content → agent stdout.
+    // Ingress: upstream stdout → (rehydrate result content) → agent stdout.
     let ingress = {
-        let vault = vault.clone();
+        let pii = pii.clone();
         let ledger = ledger.clone();
         let agent_out = agent_out.clone();
         let operations = operations.clone();
@@ -345,15 +367,21 @@ where
                     Ok(mut msg) => {
                         // The reply to a side-effecting call settles its operation
                         // before the agent sees it.
-                        let settled = settle_reply(&operations, &pending, &msg);
-                        if msg.pointer("/result/content").is_some() {
-                            let v = vault.lock().expect("vault poisoned");
-                            rehydrate_value(msg.pointer_mut("/result/content"), &v);
-                        }
+                        let settled = settle_reply(&operations, &pending, &msg, pii.is_some());
+                        let kind = match &pii {
+                            Some(pii) => {
+                                if msg.pointer("/result/content").is_some() {
+                                    let v = pii.1.lock().expect("vault poisoned");
+                                    rehydrate_value(msg.pointer_mut("/result/content"), &v);
+                                }
+                                ActionKind::Pseudonymize
+                            }
+                            None => ActionKind::Passthrough,
+                        };
                         if let Some((operation_id, state)) = settled {
-                            record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Pseudonymize, &operation_meta(state, &operation_id));
+                            record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, kind, &operation_meta(state, &operation_id));
                         } else if msg.pointer("/result/content").is_some() {
-                            record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, ActionKind::Pseudonymize, &[]);
+                            record_hop(&ledger, tenant, agent, release, Hop::McpToolResult, 0, kind, &[]);
                         }
                         serde_json::to_string(&msg).unwrap_or(line)
                     }
@@ -433,13 +461,37 @@ where
     Ok(())
 }
 
+/// Without the PII transform, refuse to run on an operations database that
+/// holds masked results (stored under the transform, or by an earlier
+/// version, which always masked): a retry would replay pseudonym tokens the
+/// agent cannot read, and only the vault they came from can restore them.
+fn refuse_masked_results(gate: &ToolGate) -> Result<()> {
+    let Some(store) = gate.operations() else { return Ok(()) };
+    let masked = store
+        .lock()
+        .map_err(|_| anyhow::anyhow!("operations store lock poisoned"))?
+        .masked_results()?;
+    if masked.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "the operations database holds {} completed operation(s) whose stored results are masked \
+         (pseudonym tokens from the PII transform, which earlier versions always applied), e.g. {}. \
+         A retry would replay them to the agent unreadable. Start with --transform pii and the \
+         vault they were masked with (CLOAKPIPE_VAULT_KEY and the configured vault path) so \
+         replays are rehydrated, or give this proxy a new --operations-db",
+        masked.len(),
+        masked[0]
+    )
+}
+
 /// Run a side-effecting call through the operations store, in one
 /// transaction: forward it (now `in_flight` under its request id), replay a
 /// `done` operation's stored result, or refuse it.
 fn coordinate(
     operations: &SharedOperations,
     pending: &Pending,
-    vault: &Mutex<Vault>,
+    pii: &SharedPii,
     id: Option<&Value>,
     tool: &str,
     op: &OperationKey,
@@ -489,10 +541,22 @@ fn coordinate(
             }
             Coordinated::Deny(Denial::OperationsUnavailable)
         }
-        Ok(Begin::Replay { result }) => match replayed(result.as_deref(), &op.operation_id, vault) {
-            Some(result) => Coordinated::Replay(result),
-            None => Coordinated::Deny(Denial::OperationsUnavailable),
-        },
+        Ok(Begin::Replay { result, masked }) => {
+            // A masked result is replayed only through the vault (start-up
+            // refuses a database holding one without the transform).
+            let vault = match (masked, pii) {
+                (false, _) => None,
+                (true, Some(pii)) => Some(&pii.1),
+                (true, None) => {
+                    tracing::warn!("operations store: {} holds a masked result and no vault is configured; refused", op.operation_id);
+                    return Coordinated::Deny(Denial::OperationsUnavailable);
+                }
+            };
+            match replayed(result.as_deref(), &op.operation_id, vault) {
+                Some(result) => Coordinated::Replay(result),
+                None => Coordinated::Deny(Denial::OperationsUnavailable),
+            }
+        }
         Ok(Begin::Conflict) => Coordinated::Deny(Denial::OperationConflict { operation_id: op.operation_id.clone() }),
         Ok(Begin::ReconcileBeforeRetry(_)) => {
             Coordinated::Deny(Denial::ReconcileBeforeRetry { operation_id: op.operation_id.clone() })
@@ -504,11 +568,12 @@ fn coordinate(
     }
 }
 
-/// The answer for a retry of a `done` operation: its stored (masked) result
-/// rehydrated as the ingress path does, marked `_meta.cloakpipe.replayed`.
+/// The answer for a retry of a `done` operation: its stored result (a masked
+/// one rehydrated through `vault`, as the ingress path does), marked
+/// `_meta.cloakpipe.replayed`.
 /// An operation an operator reconciled as done has no stored result: the
 /// agent is told it completed. `None`: the stored result is unreadable.
-fn replayed(stored: Option<&str>, operation_id: &str, vault: &Mutex<Vault>) -> Option<Value> {
+fn replayed(stored: Option<&str>, operation_id: &str, vault: Option<&Mutex<Vault>>) -> Option<Value> {
     let mut result = match stored {
         Some(stored) => serde_json::from_str::<Value>(stored).ok().filter(Value::is_object)?,
         None => serde_json::json!({
@@ -518,7 +583,7 @@ fn replayed(stored: Option<&str>, operation_id: &str, vault: &Mutex<Vault>) -> O
             }],
         }),
     };
-    if result.get("content").is_some() {
+    if let Some(vault) = vault.filter(|_| result.get("content").is_some()) {
         let v = vault.lock().ok()?;
         rehydrate_value(result.get_mut("content"), &v);
     }
@@ -531,14 +596,15 @@ fn replayed(stored: Option<&str>, operation_id: &str, vault: &Mutex<Vault>) -> O
 }
 
 /// Settle the operation an upstream reply answers: a `result` without
-/// `isError: true` is `done` (its masked result stored for replay); an
+/// `isError: true` is `done` (its result stored for replay; `masked`: under
+/// the PII transform, so it holds pseudonym tokens); an
 /// error result or a JSON-RPC `error` is `failed`. Returns the operation and
 /// its new state, or `None` when the message answers no side-effecting call
 /// or the store did not settle it (no longer `in_flight`, or unwritable).
 /// Only a reply settles: a request or notification from the upstream
 /// (`method`), or a message with neither `result` nor `error`, never does,
 /// whatever its id.
-fn settle_reply(operations: &SharedOperations, pending: &Pending, msg: &Value) -> Option<(String, OperationState)> {
+fn settle_reply(operations: &SharedOperations, pending: &Pending, msg: &Value, masked: bool) -> Option<(String, OperationState)> {
     let store = operations.as_ref()?;
     if msg.get("method").is_some() || (msg.get("result").is_none() && msg.get("error").is_none()) {
         return None;
@@ -571,7 +637,11 @@ fn settle_reply(operations: &SharedOperations, pending: &Pending, msg: &Value) -
     // operation an operator reconciled meanwhile (or another process swept)
     // keeps its state, and the ledger must not claim otherwise.
     let settled = match store.lock() {
-        Ok(mut s) => match s.settle(&operation_id, state, stored.as_deref()) {
+        Ok(mut s) => match if masked {
+            s.settle_masked(&operation_id, state, stored.as_deref())
+        } else {
+            s.settle(&operation_id, state, stored.as_deref())
+        } {
             Ok(changed) => {
                 if !changed {
                     tracing::warn!("operations store: {operation_id} is no longer in flight; its reply settles nothing");

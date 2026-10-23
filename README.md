@@ -47,7 +47,7 @@ CloakPipe is organised around four pillars: **Evaluate → Certify → Enforce �
 |---|---|---|
 | **Evaluate** | Import evaluation results as native, release-bound `EvaluationRun`s: **JUnit XML** (pytest, Jest, Go, JUnit, cargo-nextest), **Braintrust** experiments, **Langfuse** experiments (and legacy dataset runs). Score-based sources fail closed: an unscored case is an `error`, not a pass. | `cloakpipe eval import` |
 | **Certify** | Immutable, canonically hashed release manifests with a material-change diff that tells you which assurance suites a change requires. A pure, deterministic policy engine (pass rate, coverage, regressions vs. baseline, critical failures, metric thresholds) produces a decision signed as an **in-toto v1 Statement in a DSSE envelope** (Ed25519), scoped to an environment and expiring. Ships as a **GitHub Action**. | `cloakpipe release …`, [`.github/actions/certify`](.github/actions/certify) |
-| **Enforce** | **Privacy proxy**: OpenAI- and Anthropic-compatible HTTP proxy that detects PII, replaces it with consistent tokens, and restores originals in responses (including streaming), with an AES-256-GCM encrypted vault. **MCP interceptor**: masks PII in tool-call arguments and rehydrates results. **MCP tool gate**: only tools declared in the certified release run, only while its certification verifies, and only with arguments its tool contracts allow (plus a signed approval receipt where the contract requires one). | `cloakpipe start`, `cloakpipe mcp-proxy` |
+| **Enforce** | **Privacy proxy**: OpenAI- and Anthropic-compatible HTTP proxy that detects PII, replaces it with consistent tokens, and restores originals in responses (including streaming), with an AES-256-GCM encrypted vault. **MCP interceptor**: forwards tool calls unchanged by default; with `--transform pii` it masks PII in tool-call arguments and rehydrates results. **MCP tool gate**: only tools declared in the certified release run, only while its certification verifies, and only with arguments its tool contracts allow (plus a signed approval receipt where the contract requires one). | `cloakpipe start`, `cloakpipe mcp-proxy` |
 | **Prove** | **Evidence ledger**: per-tenant hash chain of signed records that carry types, counts, hashes and references, never raw PII. **External anchoring** at an RFC 3161 TSA and Sigstore Rekor. **Release audit packs**: one signed JSON file with the manifest, runs, certifications, governance history and ledger exports. A **standalone verifier** with no dependency on any evidence producer. | `cloakpipe anchor`, `cloakpipe release audit-pack`, `cloakpipe-verify` |
 
 ## Architecture
@@ -275,8 +275,10 @@ All inputs: [`.github/actions/certify/README.md`](.github/actions/certify/README
 ### Gate MCP tool calls on the release
 
 `cloakpipe mcp-proxy` sits between an agent and an upstream MCP server (stdio).
-It masks PII in tool-call arguments, rehydrates results, and with `--manifest`
-admits a `tools/call` only if the tool is declared in the release. No
+With `--manifest` it admits a `tools/call` only if the tool is declared in
+the release, and forwards an admitted call unchanged: no vault is needed.
+`--transform pii` (opt-in) also masks PII in tool-call arguments and
+rehydrates results, through the vault. No
 certification is needed, and the release needs no code, prompt, model or
 runtime pins (certification at the gate is now a legacy, source-only cargo
 feature; see [CHANGELOG.md](CHANGELOG.md)).
